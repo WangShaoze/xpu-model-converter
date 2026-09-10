@@ -1,0 +1,35 @@
+# 转换 Manifest 示例(建设目标 §14)
+#
+# 用法:
+#   xpu-converter convert --manifest examples/yolov10n.yaml --output ./output
+#   xpu-converter build   --manifest examples/yolov10n.yaml
+#
+# 命令行参数优先于本文件; source.file 相对本文件所在目录解析。
+name: yolov10n
+version: v1.0
+
+source:
+  framework: pytorch
+  model_type: yolov10
+  file: best.pt
+
+input:
+  shape: [1, 3, 640, 640]
+  dtype: float32
+
+target:
+  hardware: kunlun
+  precision: fp16
+  batch_size: 1
+
+runtime:
+  type: detection
+  port: 58025
+
+validation:
+  enabled: true
+  dataset: ./testdata
+
+package:
+  docker: true
+  name: yolov10n_dockerimg_v1.0

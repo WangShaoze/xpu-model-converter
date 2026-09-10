@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# 代码图谱索引缓存
+.codegraph/
+
+# 转换产物 / 交付包
+dist/
+output/
+build/
+*.xpu

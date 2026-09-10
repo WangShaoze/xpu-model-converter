@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xpu-model-converter"
+version = "1.0.0"
+description = "模型转换平台: PyTorch/Paddle -> ONNX -> 昆仑芯 XPU -> Docker 交付包"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Proprietary" }
+authors = [{ name = "xpu-model-converter" }]
+dependencies = [
+    "numpy>=1.21",
+    "PyYAML>=5.4",
+    "Jinja2>=3.0",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=1.13"]
+onnx = ["onnx>=1.12", "onnxruntime>=1.13"]
+paddle = ["paddlepaddle>=2.5"]
+dev = ["pytest"]
+
+[project.scripts]
+xpu-converter = "xpu_converter.cli.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["xpu_converter*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.j2", "*.yaml", "*.json", "*.sh"]

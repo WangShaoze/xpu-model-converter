@@ -1,0 +1,32 @@
+#!/bin/bash
+# =====================================================================
+# {{ package_name }} 容器启动入口
+# (由 xpu-model-converter docker_export 渲染生成, 请勿手工修改)
+# 职责: 校验交付内容 -> 打印部署信息 -> 交给公共 Runtime 启动服务
+# =====================================================================
+set -e
+
+RUNTIME_HOME="${RUNTIME_HOME:-/opt/xpu}"
+export RUNTIME_HOME
+
+echo "==> 组件: {{ package_name }} / 模型: {{ model_name }} ({{ model_version }})"
+echo "==> 任务: {{ task }}  精度: {{ precision }}  后端: {{ hardware }}  Runtime API: {{ api_version }}"
+echo "==> 端口: ${WEB_PORT:-{{ web_port }}}  设备: ${DEVICE:-{{ device }}}  并发: ${workers:-{{ workers }}}"
+
+if [ ! -f "${RUNTIME_HOME}/model/model.xpu" ]; then
+    echo "!! 未找到模型文件 ${RUNTIME_HOME}/model/model.xpu, 请检查交付包完整性"
+    exit 1
+fi
+if [ ! -f "${RUNTIME_HOME}/config/confidence.json" ]; then
+    echo "!! 未找到类别配置 ${RUNTIME_HOME}/config/confidence.json, 请检查交付包完整性"
+    exit 1
+fi
+{% if degraded %}
+echo "!! 警告: 本次导出未接入昆仑 SDK, model/model.xpu 为占位产物(内容为规范化 ONNX), 仅供联调, 请勿交付客户"
+{% endif %}
+if [ ! -e /dev/xpuctrl ] && [ "${DEVICE:-auto}" != "cpu" ]; then
+    echo "==> 未检测到 /dev/xpuctrl, 将自动降级 CPU 推理(可用但较慢)"
+fi
+
+cd "${RUNTIME_HOME}"
+exec /bin/bash service.sh

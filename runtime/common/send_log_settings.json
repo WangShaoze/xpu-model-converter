@@ -1,0 +1,19 @@
+{
+    "SEND_LOG_ENABLED": true,
+    "MINIO_HOST": "128.128.0.1",
+    "MINIO_PORT": "9000",
+    "MINIO_BUCKET": "alg-log",
+    "MINIO_ACCESS_KEY": "minioadmin",
+    "MINIO_SECRET_KEY": "minioadmin123",
+    "KAFKA_HOST": "128.128.0.1",
+    "KAFKA_PORT": "9092",
+    "KAFKA_TOPIC": "alg-log",
+    "setflag_param": {
+        "g_upload_data_empty_minio": {
+            "describe": "true:识别结果data为[]会上传文件; false:识别结果data为[]不上传文件;默认false",
+            "key": "g_upload_data_empty_minio",
+            "value_type": "int",
+            "value": false
+        }
+    }
+}

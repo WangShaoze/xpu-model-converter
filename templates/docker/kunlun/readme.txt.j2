@@ -1,0 +1,90 @@
+组件名称:
+{{ model_name }}({{ package_version }})
+
+一、说明
+本目录为模型转换平台导出的算法组件, 包含算法镜像构建与部署脚本。
+算法服务接口与"南网人工智能组件"规范一致, 支持三种请求方式与 /health 健康检查。
+模型: {{ model_name }} ({{ model_version }})   任务: {{ task }}   精度: {{ precision }}   后端: {{ hardware }}
+本包文件名、镜像名、容器名与接口参数均由 manifest.json 统一生成, 不会出现描述与实际文件不一致的情况。
+{% if degraded %}
+!! 注意: 本次导出时未检测到昆仑 SDK, model/model.xpu 为占位产物(内容为规范化 ONNX), 仅供链路联调, 请勿交付客户。
+   请在具备昆仑 SDK 的环境中以 sdk_adapter=xpuctl 重新执行编译与导出。
+{% endif %}
+二、部署方式{% if image_tar %}(推荐: 镜像 tar 加载){% else %}(推荐: 本地构建){% endif %}
+
+{% if image_tar %}
+算法镜像 tar 已自包含全部镜像层, 目标机器无需预先安装基础镜像。
+1、加载镜像
+$ docker load -i {{ image_tar }}
+2、运行容器(昆仑芯 XPU 服务器)
+$ docker run -d \
+  -p {{ web_port }}:{{ web_port }} \
+  --name {{ container_name }} \
+  --privileged --device=/dev/xpuctrl \
+  --restart=always \
+  {{ image_full }}
+  注: 容器内 DEVICE 默认 auto, 自动探测 XPU 卡; 若未透传加速卡会自动降级 CPU(可用但较慢)。
+3、容器内配置覆盖(可选, 不设置则使用镜像内默认值)
+$ docker run ... -e DEVICE=xpu -e workers=2 -e WEB_PORT={{ web_port }} -e KAFKA_HOST=10.10.65.105 ...
+{% else %}
+本包内不含镜像 tar, 请使用下方命令构建并启动(等价于 sh build.sh install)。
+1、构建算法镜像
+$ docker build -t {{ image_full }} .
+2、运行容器(昆仑芯 XPU 服务器)
+$ docker run -d \
+  -p {{ web_port }}:{{ web_port }} \
+  --name {{ container_name }} \
+  --privileged --device=/dev/xpuctrl \
+  --restart=always \
+  {{ image_full }}
+  注: 容器内 DEVICE 默认 auto, 自动探测 XPU 卡; 若未透传加速卡会自动降级 CPU(可用但较慢)。
+3、容器内配置覆盖(可选, 不设置则使用镜像内默认值)
+$ docker run ... -e DEVICE=xpu -e workers=2 -e WEB_PORT={{ web_port }} -e KAFKA_HOST=10.10.65.105 ...
+{% endif %}
+三、自动部署方式(可选)
+$ sh build.sh            # 安装: 删除旧容器/镜像后构建并启动
+$ sh build.sh -i         # 同上
+$ sh build.sh -d         # 删除容器与镜像
+$ sh build.sh -s         # 停止并删除容器
+$ sh build.sh -h         # 用法说明
+
+四、接口测试
+1、测试(multipart/form-data 方式)
+$ curl http://localhost:{{ web_port }}/predict -F file=@./testimage.jpg
+2、测试(urlpath 方式)
+$ curl -X POST http://localhost:{{ web_port }}/predict -H "Content-Type:application/json" --data '{"urlpath":"http://xxx/testimage.jpg"}'
+3、测试(base64 方式)
+$ curl -X POST http://localhost:{{ web_port }}/predict -H "Content-Type:application/json" --data '{"base64":"/xdadd..."}'
+4、结果图方式
+$ curl -X POST http://localhost:{{ web_port }}/predict_image -F file=@./testimage.jpg
+5、健康检查
+$ curl http://localhost:{{ web_port }}/health
+
+五、响应结构(与客户规范一致)
+{
+  "task_id": "...", "algorithm": "{{ algorithm_name }}", "code": 0, "message": "识别正常",
+  "data": [{"title": "person", "code": "00000004", "left": .., "top": .., "right": .., "bottom": .., "confidence": 0.87}]
+}
+说明: 输出类别与阈值在容器内 /opt/xpu/config/confidence.json 中配置(共 {{ class_count }} 类)。
+      code 字段为导出编号占位(1~{{ class_count }}), 客户侧按需替换为业务类别编码; 不需要输出的类别将 is_export 置 0。
+
+六、交付包结构
+manifest.json          交付包清单(文件列表/校验和/接口参数, 唯一事实来源)
+Dockerfile             镜像构建文件(由模板渲染)
+build.sh               自动部署脚本
+install.conf           部署参数备忘(与 Dockerfile ENV 一致)
+packages/              额外依赖轮子(可为空)
+runtime.tgz            公共 Runtime(所有模型共用, 与模型解耦)
+model/model.xpu        编译后的模型
+model/model.yaml       本次转换任务描述(Manifest YAML)
+model/metadata.json    编译产物元信息(后端/精度/SDK)
+config/confidence.json 类别与阈值配置
+config/runtime.yaml    Runtime 运行配置(输入尺寸/前后处理/端口)
+
+七、日志上报(minio/kafka)
+识别/解析日志默认上报到本机 send_log_webserver(端口 20000), 再转投 MINIO/KAFKA。
+若未配置 MINIO_HOST/KAFKA_HOST(为空), 上报自动关闭, 不影响识别服务。
+docker run -e 可覆盖: MINIO_HOST/MINIO_PORT/MINIO_BUCKET/MINIO_ACCESS_KEY/MINIO_SECRET_KEY/KAFKA_HOST/KAFKA_PORT/KAFKA_TOPIC/PROVINCE_CODE/BUREAU_CODE/REGION_CODE
+
+八、版本更新情况
+{{ package_version }}: 由 xpu-model-converter {{ converter_version }} 导出生成

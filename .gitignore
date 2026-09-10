@@ -12,3 +12,10 @@ dist/
 output/
 build/
 *.xpu
+
+# 模型权重目录: 权重一律不入库, 仅保留占位文件
+models/*
+!models/.gitkeep
+
+# ultralytics 运行缓存
+Ultralytics/

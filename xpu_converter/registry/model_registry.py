@@ -16,10 +16,13 @@ from xpu_converter.paths import model_config_path
 
 # 文件名中的模型关键字 -> model_type(用于 --model-type 缺省时的自动识别)
 FILENAME_HINTS: List[tuple] = [
-    ("yolov10", "yolov10"),
+    ("yolov5", "yolov5"),
     ("yolov8", "yolov8"),
     ("yolov9", "yolov9"),
+    ("yolov10", "yolov10"),
     ("yolo11", "yolov11"),
+    ("yolo12", "yolov12"),
+    ("yolo26", "yolov26"),
     ("ppocr", "ppocr"),
     ("paddledetection", "paddledetection"),
     ("ppdet", "paddledetection"),
@@ -41,10 +44,13 @@ def _ensure_loaded() -> None:
     if _LOADED:
         return
     _LOADED = True
-    from xpu_converter.frontend.pytorch import yolov8, yolov9, yolov10, yolov11
+    from xpu_converter.frontend.pytorch import (
+        yolo12, yolo26, yolov5, yolov8, yolov9, yolov10, yolov11,
+    )
     from xpu_converter.frontend.paddle import ppocr, paddledetection
 
-    for module in (yolov8, yolov9, yolov10, yolov11, ppocr, paddledetection):
+    for module in (yolov5, yolov8, yolov9, yolov10, yolov11, yolo12, yolo26,
+                   ppocr, paddledetection):
         for name in dir(module):
             candidate = getattr(module, name)
             if isinstance(candidate, type) and issubclass(candidate, BaseModelAdapter) \

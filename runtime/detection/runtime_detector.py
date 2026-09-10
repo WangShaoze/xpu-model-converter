@@ -54,7 +54,8 @@ class Detector:
         self.max_det = settings.MAX_DET
         self.num_classes = settings.NUM_CLASSES
         self.layout = settings.OUTPUT_LAYOUT
-        self.preprocess = settings.PREPROCESS
+        # 注意: 不能命名为 self.preprocess, 否则会覆盖下面的 preprocess() 方法
+        self.preprocess_cfg = settings.PREPROCESS
 
     # ------------------------------------------------------------------ 预处理
     def preprocess(self, image_bgr: np.ndarray) -> Tuple[np.ndarray, float, Tuple[float, float]]:
@@ -64,13 +65,13 @@ class Detector:
         target = self.input_shape[-2:] if len(self.input_shape) >= 4 else (640, 640)
         letterboxed, ratio, pad = letterbox(
             image_bgr, target,
-            color=int(self.preprocess.get("pad_value", 114)),
-            scale_up=bool(self.preprocess.get("letterbox_scale_up", False)),
+            color=int(self.preprocess_cfg.get("pad_value", 114)),
+            scale_up=bool(self.preprocess_cfg.get("letterbox_scale_up", False)),
         )
-        color = str(self.preprocess.get("color", "RGB")).upper()
+        color = str(self.preprocess_cfg.get("color", "RGB")).upper()
         if color == "RGB":
             letterboxed = cv2.cvtColor(letterboxed, cv2.COLOR_BGR2RGB)
-        scale = float(self.preprocess.get("scale", 1.0 / 255.0))
+        scale = float(self.preprocess_cfg.get("scale", 1.0 / 255.0))
         tensor = letterboxed.astype(np.float32) * scale
         tensor = np.transpose(tensor, (2, 0, 1))[None, ...]  # NCHW
         return np.ascontiguousarray(tensor), ratio, pad

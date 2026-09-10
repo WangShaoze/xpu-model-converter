@@ -34,6 +34,7 @@ from xpu_converter.exporter.manifest import (
     collect_files,
 )
 from xpu_converter.exporter.template import TemplateRenderer
+from xpu_converter.paths import home_dir
 from xpu_converter.paths import runtime_dir
 from xpu_converter.version import CONVERTER_VERSION, RUNTIME_API_VERSION
 
@@ -112,8 +113,18 @@ class DockerExporter:
         if packages_dir is None:
             # 未显式指定时回退到 configs/hardware/*.yaml 的 docker.packages_dir
             packages_dir = (self.hardware_config.docker or {}).get("packages_dir") or None
-        self.packages_dir = packages_dir
+        self.packages_dir = self._resolve_packages_dir(packages_dir)
         self.converter_version = converter_version
+
+    @staticmethod
+    def _resolve_packages_dir(value: Optional[str]) -> Optional[str]:
+        """规范化为绝对路径: 相对路径以项目根为基准, 目录不存在则视为未配置。"""
+        if not value:
+            return None
+        path = Path(value)
+        if not path.is_absolute():
+            path = home_dir() / path
+        return str(path) if path.is_dir() else None
 
     # ------------------------------------------------------------------ 主流程
     def export(
@@ -189,7 +200,7 @@ class DockerExporter:
         }
         if onnx_path:
             metadata["metadata"]["onnx_source"] = Path(onnx_path).name
-        with open(model_dir / METADATA_FILENAME, "w", encoding="utf-8") as fw:
+        with open(model_dir / METADATA_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(metadata, fw, ensure_ascii=False, indent=2)
 
         # model.yaml: 本次转换任务的 Manifest YAML(建设目标 §14)
@@ -211,7 +222,7 @@ class DockerExporter:
             }
             for index, name in enumerate(class_names)
         ]
-        with open(config_dir / CONFIDENCE_FILENAME, "w", encoding="utf-8") as fw:
+        with open(config_dir / CONFIDENCE_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(confidence, fw, ensure_ascii=False, indent=2)
 
         dump_yaml(self._runtime_yaml(class_names), config_dir / RUNTIME_YAML_FILENAME)
@@ -231,6 +242,7 @@ class DockerExporter:
                 "本目录用于放置算法镜像所需的额外依赖轮子(.whl/.tar.gz)。\n"
                 "当前交付包未包含额外依赖, 基础镜像内 Python 环境已满足运行需要。\n",
                 encoding="utf-8",
+                newline="\n",
             )
 
     def _runtime_yaml(self, class_names: List[str]) -> Dict[str, Any]:

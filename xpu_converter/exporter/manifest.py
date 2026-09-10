@@ -155,7 +155,8 @@ class PackageManifest:
     def save(self, path) -> str:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.to_json(), encoding="utf-8")
+        # newline="\n": manifest.json 随交付包分发到 Linux, 统一 LF
+        target.write_text(self.to_json(), encoding="utf-8", newline="\n")
         return str(target)
 
     @classmethod
@@ -201,7 +202,7 @@ def build_manifest(
         package_name="{}_dockerimg_{}".format(name, version),
         package_version=version,
         model_name=name,
-        model_version="custom",
+        model_version=version,
         framework=framework,
         task=task,
         hardware=hardware,

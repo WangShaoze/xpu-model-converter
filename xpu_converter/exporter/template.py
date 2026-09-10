@@ -62,7 +62,10 @@ class TemplateRenderer:
     def render_to(self, template_name: str, output_path, context: Dict[str, Any]) -> str:
         target = Path(output_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.render(template_name, context), encoding="utf-8")
+        # newline="\n": 交付脚本/Dockerfile 必须是 LF 换行;
+        # 在 Windows 上默认会写成 CRLF, 导致 Linux 侧 sh build.sh 报
+        # "Syntax error: word unexpected (expecting \"in\")"。
+        target.write_text(self.render(template_name, context), encoding="utf-8", newline="\n")
         return str(target)
 
     def render_all(self, output_dir, context: Dict[str, Any]) -> List[str]:

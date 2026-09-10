@@ -19,3 +19,11 @@ models/*
 
 # ultralytics 运行缓存
 Ultralytics/
+
+# 交付包依赖轮子: 体积较大不入库, 需自行准备到该目录
+# (否则 Dockerfile 的 pip install 无轮子可装, 交付包会缺 gunicorn/onnxruntime 等依赖)。
+# 所需集合见 configs/hardware/kunlun.yaml 中 packages_dir 的注释。
+vendor/wheels/
+
+# 接口验证测试图(本地素材)
+images/yolov5-test-images/

@@ -38,7 +38,8 @@ def load_yaml(path) -> Dict[str, Any]:
 def dump_yaml(data: Dict[str, Any], path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fw:
+    # newline="\n": 交付包内的 yaml 需要 LF 换行, 避免 Windows 下写成 CRLF
+    with open(path, "w", encoding="utf-8", newline="\n") as fw:
         if yaml is not None:
             yaml.safe_dump(data, fw, allow_unicode=True, sort_keys=False)
         else:  # pragma: no cover

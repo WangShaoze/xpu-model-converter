@@ -13,7 +13,8 @@
 # 说明:
 #   - 部署参数(端口/卡号/并发/上报地址等)在 Dockerfile 的 ENV 中, 可改后重新 install
 #   - docker run 时也可追加 -e 参数覆盖, 例如: -e WEB_PORT={{ web_port }} -e workers=2
-#   - 昆仑芯 XPU 服务器必须带 --privileged --device=/dev/xpuctrl 启动; 无 XPU 卡环境会自动降级 CPU
+#   - 昆仑芯 XPU 服务器带 --privileged --device=/dev/xpuctrl 启动;
+#     若目标机无该设备节点, 脚本会自动去掉该参数并以 CPU 模式启动
 # =====================================================================
 
 image_name="{{ image_name }}"
@@ -24,7 +25,14 @@ container_name="{{ container_name }}"
 # 从 Dockerfile 读取默认端口
 web_port=$(grep -oP "(?<=ENV WEB_PORT=).*" Dockerfile | tr -d '\n\r')
 
-devices_params="--privileged --device=/dev/xpuctrl"
+# 昆仑芯 XPU 服务器需要 --device=/dev/xpuctrl; 若该设备节点不存在,
+# docker run 会直接报错退出, 因此这里按实际设备探测, 无卡机器自动降级 CPU 运行
+if [ -e /dev/xpuctrl ]; then
+    devices_params="--privileged --device=/dev/xpuctrl"
+else
+    devices_params="--privileged"
+    echo "!! 未检测到 /dev/xpuctrl 设备节点, 将以 CPU 模式启动容器"
+fi
 
 help_info() {
     cat <<EOF
@@ -99,7 +107,7 @@ docker run -d \
     ${image_full}
 
 if [ $? -ne 0 ]; then
-    echo "!! 容器启动失败,请检查 docker run 参数(无 XPU 卡环境请使用: DEVICE=cpu)"
+    echo "!! 容器启动失败, 请检查上方 docker run 报错信息"
     exit 1
 fi
 

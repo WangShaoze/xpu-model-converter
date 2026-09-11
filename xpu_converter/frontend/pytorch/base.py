@@ -9,6 +9,8 @@
 """
 import os
 import shutil
+import sys
+import types
 from typing import Any, List, Optional, Tuple
 
 from xpu_converter.errors import ExportError, ModelLoadError
@@ -32,6 +34,91 @@ def require_torch():
         return torch
     except ImportError:
         raise ModelLoadError("缺少 PyTorch 依赖, 请执行: pip install torch")
+
+
+#: thuyngch(王建尧/WongKinYiu)系模型在反序列化时会 import ``models.*``(来自其源码
+#: 仓库), 而 ``models/common.py -> utils/general.py`` 又会在 import 期触发
+#: ``import torchvision``。本环境 torch 与 torchvision 的 ABI 不匹配(装了 torchvision
+#: 也无法正常 import), 因此用一份只够 import 期通过的 torchvision 占位模块将其隔离,
+#: 让 checkpoint 能顺利反序列化。真正在导出阶段不调用 torchvision 的 NMS, 故不受影响。
+_TORCHVISION_STUB_FLAG = "_xpu_stub"
+
+
+def install_torchvision_stub() -> None:
+    """在 sys.modules 注入一份 torchvision 占位模块(幂等)。
+
+    仅当真实 torchvision 无法 import 时才注入; 若真实库可用则不做任何事。
+    """
+    if sys.modules.get("torchvision") is not None:
+        if getattr(sys.modules["torchvision"], _TORCHVISION_STUB_FLAG, False):
+            return  # 已注入
+        try:
+            import torchvision  # noqa: F401
+            return  # 真实 torchvision 可用, 不注入
+        except Exception:
+            pass
+
+    real = types.ModuleType("torchvision")
+    real.__path__ = []
+
+    ops = types.ModuleType("torchvision.ops")
+
+    def _nms(boxes, scores, iou_thres=None, *args, **kwargs):
+        # 占位实现: 按分数排序取前 30000 个索引; 仅用于满足 import, 导出不调用。
+        if boxes is None or not hasattr(boxes, "numel") or boxes.numel() == 0:
+            return __import__("torch").empty(0, dtype=__import__("torch").long)
+        torch = __import__("torch")
+        n = min(scores.numel(), 30000)
+        return torch.argsort(scores, descending=True)[:n]
+
+    ops.nms = _nms
+    ops.non_max_suppression = _nms
+    # thuyngch 系(yolov7/9) utils/common 在 import 期会引用下列符号; 仅需存在即可
+    ops.sigmoid_focal_loss = lambda *a, **k: None
+    for _op in ("DeformConv2d", "roi_pool", "roi_align", "ps_roi_pool", "ps_roi_align",
+                "RoIAlign", "RoIPool", "PSRoIAlign", "PSRoIPool"):
+        if not hasattr(ops, _op):
+            setattr(ops, _op, None)
+    real.ops = ops
+
+    datasets = types.ModuleType("torchvision.datasets")
+    for _base in ("ImageFolder", "CocoDetection", "VOCDetection", "MNIST"):
+        setattr(datasets, _base, list)
+    real.datasets = datasets
+
+    transforms = types.ModuleType("torchvision.transforms")
+    for _name in ("Compose", "ToTensor", "Normalize", "Resize", "CenterCrop",
+                  "RandomCrop", "RandomHorizontalFlip", "RandomAffine", "Grayscale"):
+        setattr(transforms, _name, list if _name == "Compose" else type(_name, (), {}))
+    real.transforms = transforms
+
+    functional = types.ModuleType("torchvision.transforms.functional")
+    for _name in ("to_tensor", "resize", "normalize", "hflip", "vflip", "affine", "rgb_to_grayscale"):
+        setattr(functional, _name, lambda *a, **k: a[0] if a else None)
+    real.transforms.functional = functional
+
+    models_mod = types.ModuleType("torchvision.models")
+    for _name in ("resnet18", "efficientnet_b0"):
+        setattr(models_mod, _name, lambda *a, **k: None)
+    real.models = models_mod
+
+    utils = types.ModuleType("torchvision.utils")
+    utils.save_image = lambda *a, **k: None
+    real.utils = utils
+
+    setattr(real, _TORCHVISION_STUB_FLAG, True)
+    for _mod in (real, ops, datasets, transforms, functional, models_mod, utils):
+        sys.modules.setdefault(_mod.__name__, _mod)
+    # 顶层模块的注册顺序要在子模块之后, 确保属性已挂载
+    sys.modules["torchvision"] = real
+
+
+def prepend_model_source_root(root: str) -> None:
+    """把 thuyngch 源码仓库根目录加入 sys.path(前置), 供 checkpoint 反序列化导入 ``models.*``。"""
+    root = os.path.abspath(root)
+    if root in sys.path:
+        return
+    sys.path.insert(0, root)
 
 
 def collect_tensors(torch, output: Any) -> List[Any]:
@@ -69,15 +156,49 @@ def build_output_wrapper(torch, model):
     return OutputWrapper()
 
 
+def build_raw_output_wrapper(torch, model, index: int):
+    """只导出 forward 返回值中的**第 index 个主输出**(去掉后处理/指标等旁支)。
+
+    thuyngch 系检测模型(yolov9 等)的 ``forward`` 常返回
+    ``[raw_tensor, postprocess_metrics]``; 若按整体收集会把指标分支一并追踪,
+    引入动态 shape。这里只保留主张量, 从而得到静态通道的干净 ONNX。
+    """
+
+    class RawOutputWrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = model
+            self.index = index
+
+        def forward(self, x):
+            output = self.model(x)
+            if isinstance(output, dict):
+                return list(output.values())[self.index] if self.index is not None else output
+            if isinstance(output, (list, tuple)):
+                return output[self.index]
+            return output
+
+    return RawOutputWrapper()
+
+
 class PyTorchAdapter(BaseModelAdapter):
     """PyTorch 通用适配器。"""
 
     framework = "pytorch"
     #: ultralytics 侧模型名; 为 None 表示不使用 ultralytics 导出
     ultralytics_name: Optional[str] = None
+    #: 原生 torch.onnx.export 时只导出 forward 返回列表中第 index 个主输出;
+    #: None 表示收集全部 Tensor。用于 thuyngch 系(forward 带后处理指标旁支)模型。
+    raw_output_index: Optional[int] = None
+    #: thuyngch(王建尧/WongKinYiu)系模型需要其源码仓库(models.*) + torchvision 占位
+    #: 才能反序列化 checkpoint; 置 True 时导出前自动处理好这两件事。
+    requires_torchvision_stub: bool = False
+    #: thuyngch 源码仓库根目录(含 models/common.py 等), 用于反序列化导入。
+    model_source_root: Optional[str] = None
 
     # ------------------------------------------------------------- 加载识别
     def load_model(self, model_path: str) -> Any:
+        self._prepare_import_env()
         torch = require_torch()
         path = self._require_file(model_path)
         obj = self._torch_load(torch, path)
@@ -91,6 +212,33 @@ class PyTorchAdapter(BaseModelAdapter):
             return torch.load(path, map_location="cpu")
         except Exception as err:
             raise ModelLoadError("torch.load 读取权重失败: {} ({})".format(path, err))
+
+    # -------------------------------------------------- thuyngch 系加载前置
+    def _prepare_import_env(self) -> None:
+        """反序列化 checkpoint 前准备好 import 环境(thuyngch 系专用)。"""
+        if self.model_source_root:
+            prepend_model_source_root(self.model_source_root)
+        if self.requires_torchvision_stub:
+            install_torchvision_stub()
+
+    @staticmethod
+    def set_export_flag(module: Any, value: bool = True) -> None:
+        """把模型内所有检测头模块的 ``export`` 属性置位。
+
+        thuyngch 系 yolo.py 的 Detect 头在 ``export=True`` 时直接返回合并后的
+        静态 ``[B, 4+nc, N]`` 主张量(而不是 ``(y, x)`` 双路旁支), 这是得到干净
+        ONNX 的关键。
+        """
+        import torch
+
+        if isinstance(module, torch.nn.Module) and hasattr(module, "export") \
+                and not callable(getattr(module, "export", None)):
+            module.export = value
+        for child in module.children() if isinstance(module, torch.nn.Module) else []:
+            PyTorchAdapter.set_export_flag(child, value)
+
+    def _prepare_for_export(self, model: Any) -> None:
+        """导出前对已加载模型的定制(如设置 Detect 头的 export 标志)。"""
 
     def _extract_module(self, torch, obj: Any, path: str) -> Any:
         """从 checkpoint 中取出可导出的 ``nn.Module``(ChatGPT 修改意见 §11)。
@@ -223,9 +371,16 @@ class PyTorchAdapter(BaseModelAdapter):
 
     def _export_via_torch(self, path, output_path, shape, opset, dynamic) -> str:
         torch = require_torch()
+        self._prepare_import_env()
         model = self.load_model(path)
         model.eval()
-        wrapper = build_output_wrapper(torch, model)
+        # 原生导出统一以 fp32 进行: 权重可能是 fp16(如部分 thuyngch 权重), 与 dummy 输入对齐
+        model = model.float()
+        self._prepare_for_export(model)
+        if self.raw_output_index is not None:
+            wrapper = build_raw_output_wrapper(torch, model, self.raw_output_index)
+        else:
+            wrapper = build_output_wrapper(torch, model)
         dummy = torch.zeros(*shape, dtype=torch.float32)
         with torch.no_grad():
             probed = collect_tensors(torch, wrapper(dummy))
@@ -247,6 +402,7 @@ class PyTorchAdapter(BaseModelAdapter):
                 opset_version=opset,
                 do_constant_folding=True,
                 dynamic_axes=dynamic_axes,
+                dynamo=False,  # 用经典导出器, 避免 torch 2.1x 默认 dynamo 需 onnxscript
             )
         except Exception as err:
             raise ExportError("torch.onnx.export 导出失败: {} ({})".format(path, err))

@@ -279,19 +279,39 @@ def _module_version(name: str) -> str:
 def _sanitize_onnx_for_x2paddle(onnx_path: str, workdir: Path) -> str:
     """修补 X2Paddle 1.6.0 无法处理的 ONNX 写法, 返回可转换的 ONNX 路径。
 
-    已确认的两类问题:
+    处理的几类问题(任一按需应用, 无改动时返回原路径, 避免无谓复制):
 
+    0. 常数折叠(onnx-simplifier): thuyngch 系(xolov9/7)的 ``chunk/split`` 会被
+       torch 导出成 Slice, 其 start/end 由 ``Shape->Gather`` 等地步推导; X2Paddle
+       无法折叠, 认为通道维是 -1 并报
+       ``The number of input's channels should be ..., input's channels is -1``。
+       先用 onnxsim 常数折叠把这些动态 Slice 边界固化为字面量, 得到全静态图;
     1. MaxPool 的默认 ``dilations=[1,1]`` 会被当作不支持属性并报错;
     2. Conv 的 ``kernel_shape`` 在 ONNX 中是**可选**属性(可从权重推导), 但
        X2Paddle 直接 ``len(kernel_shape)`` 会因 ``None`` 崩溃, 需按权重补齐。
-
-    无任何改动时返回原路径, 避免无谓地复制模型。
+    3. Resize 的 ``[X, "", "", sizes]``(opset>=11 提供 sizes 的标准写法)会让
+       X2Paddle 1.6.0 在 ``node.inputs`` 里跳过空占位 scale, 取 sizes 时下标
+       越界。把 scale 固化为常量并收敛为两输入 ``[X, scales]`` 规避。
     """
+    current = str(onnx_path)
+    simplified = _simplify_onnx_for_x2paddle(current, workdir)
+    current = simplified
+
     import onnx
 
-    model = onnx.load(onnx_path)
+    model = onnx.load(current)
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
     changed = 0
+
+    # 2. ``Resize`` 的 [X, "", "", sizes] 写法会让 X2Paddle 1.6.0 在构造
+    #    ``node.inputs`` 时跳过空占位 scale, 随后 ``get_input_node(idx=3)``
+    #    越界报 ``IndexError``。这里统一重写为 opset-10 的两输入形式
+    #    ``[X, scales]``, 常量 scale 由静态 sizes / 输入形状推导。
+    for node in model.graph.node:
+        if node.op_type == "Resize" and any(i == "" for i in node.input):
+            _rewrite_resize_in_place(model, node, initializers)
+            changed += 1
+
     for node in model.graph.node:
         if node.op_type == "MaxPool" and _has_attribute(node, "dilations"):
             kept = [attr for attr in node.attribute if attr.name != "dilations"]
@@ -306,10 +326,89 @@ def _sanitize_onnx_for_x2paddle(onnx_path: str, workdir: Path) -> str:
                 node.attribute.extend([onnx.helper.make_attribute("kernel_shape", kernel)])
                 changed += 1
     if changed == 0:
-        return onnx_path
-    sanitized = workdir / (Path(onnx_path).stem + "_x2paddle.onnx")
+        return current
+    sanitized = workdir / (Path(current).stem + "_x2paddle.onnx")
     onnx.save(model, str(sanitized))
     return str(sanitized)
+
+
+def _simplify_onnx_for_x2paddle(onnx_path: str, workdir: Path) -> str:
+    """用 onnx-simplifier 做常数折叠, 把数据相关的 Slice 边界固化为字面量。
+
+    thuyngch 系(yolov9/7)的 ``chunk/split`` 经 torch 导出为 Slice, 其 start/end 常
+    由 ``Shape -> Gather -> ... -> Mul`` 推导; X2Paddle 不折叠, 通道维被判为 -1。
+    onnxsim 的常数折叠可消解这些动态边界, 得到 X2Paddle 能处理的静态图。
+
+    依赖缺失或简化失败时**不阻断**, 退回原始路径; 真正的转换失败会在 onnx2paddle
+    阶段报出可读错误。
+    """
+    if importlib.util.find_spec("onnxsim") is None:
+        return onnx_path
+    try:
+        from onnxsim import simplify
+
+        import onnx
+
+        model = onnx.load(onnx_path)
+        simplified_model, _ok = simplify(model)
+        # 结果仍是个静态可转换图即可; ok 标志在 onnxruntime 校验缺失时可能为 False
+        if simplified_model is None:
+            return onnx_path
+        target = workdir / (Path(onnx_path).stem + "_simplified.onnx")
+        onnx.save(simplified_model, str(target))
+        return str(target)
+    except Exception:
+        return onnx_path
+
+
+def _static_shape(model: Any, name: str) -> List[int]:
+    """返回静态图里某张量名字的已知 shape, 查不到或含动态维时返回 -1。"""
+    for vi in list(model.graph.value_info) + list(model.graph.input) + list(model.graph.output):
+        if vi.name == name:
+            dims = vi.type.tensor_type.shape.dim
+            return [d.dim_value if d.HasField("dim_value") else -1 for d in dims]
+    return []
+
+
+def _rewrite_resize_in_place(model: Any, node: Any, initializers: Dict[str, Any]) -> None:
+    """把 [X, "", "", sizes] 形式的 ``Resize`` 重写为 opset-10 两输入 [X, scales]。
+
+    X2Paddle 1.6.0 解析 4 输入 Resize 时会跳过空占位 scale(``build_connection``
+    里 ``in_node == ''`` 直接 ``continue``), 导致 ``node.inputs`` 里实际下标右移,
+    随后 ``_interpolate`` 用 ``get_input_node(idx=3)`` 取 sizes 时 ``IndexError``。
+    这里把 scale 固化为常量并收敛为两输入, 走 x2paddle 的 ``len(input) == 2`` 分支。
+    """
+    import onnx
+
+    if len(node.input) not in (3, 4):
+        return
+    x_name = node.input[0]
+    sizes_name = node.input[3] if len(node.input) == 4 else None
+    scales_name = next(
+        (i for i in (node.input[2] if len(node.input) >= 3 else None, node.input[1]) if i), None
+    )
+
+    scale_val: Optional[List[float]] = None
+    if sizes_name and sizes_name in initializers:
+        sizes = [float(v) for v in onnx.numpy_helper.to_array(initializers[sizes_name]).tolist()]
+        x_shape = _static_shape(model, x_name)
+        if len(x_shape) == 4 and x_shape[2] > 0 and x_shape[3] > 0:
+            scale_val = [1.0, 1.0, sizes[2] / x_shape[2], sizes[3] / x_shape[3]]
+    if scale_val is None and scales_name and scales_name in initializers:
+        arr = [float(v) for v in onnx.numpy_helper.to_array(initializers[scales_name]).tolist()]
+        if len(arr) == 4:
+            scale_val = arr
+    if scale_val is None:
+        return
+
+    scale_name = (node.name + "_scales").replace("/", "_")
+    const = onnx.helper.make_tensor(
+        scale_name, onnx.TensorProto.FLOAT, [4], scale_val
+    )
+    model.graph.initializer.append(const)
+    initializers[scale_name] = const
+    del node.input[:]
+    node.input.extend([x_name, scale_name])
 
 
 def _has_attribute(node, name: str) -> bool:

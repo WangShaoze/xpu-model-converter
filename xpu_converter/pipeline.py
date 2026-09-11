@@ -18,6 +18,7 @@ from xpu_converter.backend.base import BackendArtifact, OperatorAnalysis
 from xpu_converter.capability.hardware import HardwareCapability, probe_kunlun
 from xpu_converter.capability.matrix import CapabilityReport, build_report
 from xpu_converter.config import BuildManifest, HardwareConfig, ModelConfig
+from xpu_converter.contract.output import ModelOutputContract
 from xpu_converter.environment import source_fingerprint
 from xpu_converter.errors import NotSupportedError, XpuConverterError
 from xpu_converter.exporter.docker_exporter import DockerExporter
@@ -343,6 +344,17 @@ class ConversionPipeline:
 
     def _step_compile(self) -> str:
         from xpu_converter.backend.kunlun.graph_builder import XpuGraphBuilder
+
+        # 输出契约探测(GitHub §14/§15/§16): 必须在最终(优化+改写)图上做, 否则会被
+        # NMS 剥离等改写误导。结果写回 adapter.config, 由导出器落到 runtime.yaml /
+        # metadata.json, Runtime 据此选择解码器, 不再用 shape 启发式。
+        detected = ModelOutputContract.detect(
+            self.graph, num_classes=int(self.adapter.config.num_classes or 0)
+        )
+        self.adapter.config.output = detected.to_dict()
+        self.adapter.config.output_layout = detected.layout
+        self.adapter.config.end2end = detected.end2end
+        self.reporter.info("output contract: {}".format(detected.summary()))
 
         report = self._final_capability_check()
         self.result.capability = report

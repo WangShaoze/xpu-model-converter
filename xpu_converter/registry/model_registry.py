@@ -67,6 +67,9 @@ SUPPORT_TABLE: List[ModelSupport] = [
                  "V1 唯一承诺交付的模型"),
     ModelSupport("yolov8", STATUS_EXPERIMENTAL, "pytorch", "detection", "ultralytics>=8.0"),
     ModelSupport("yolov9", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
+    ModelSupport("yolov7", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
+    ModelSupport("yolov6", STATUS_EXPERIMENTAL, "pytorch", "detection", "",
+                 "美团视觉智能部, 原生 pt→onnx→paddle"),
     ModelSupport("yolov11", STATUS_EXPERIMENTAL, "pytorch", "detection", "ultralytics>=8.3"),
     ModelSupport("yolov5", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
     ModelSupport("yolov12", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
@@ -98,6 +101,8 @@ def supported_models(status: Optional[str] = None) -> List[ModelSupport]:
 # 文件名中的模型关键字 -> model_type(用于 --model-type 缺省时的自动识别)
 FILENAME_HINTS: List[tuple] = [
     ("yolov5", "yolov5"),
+    ("yolov6", "yolov6"),
+    ("yolov7", "yolov7"),
     ("yolov8", "yolov8"),
     ("yolov9", "yolov9"),
     ("yolov10", "yolov10"),
@@ -126,11 +131,11 @@ def _ensure_loaded() -> None:
         return
     _LOADED = True
     from xpu_converter.frontend.pytorch import (
-        yolo12, yolo26, yolov5, yolov8, yolov9, yolov10, yolov11,
+        yolo12, yolo26, yolov5, yolov6, yolov7, yolov8, yolov9, yolov10, yolov11,
     )
     from xpu_converter.frontend.paddle import ppocr, paddledetection
 
-    for module in (yolov5, yolov8, yolov9, yolov10, yolov11, yolo12, yolo26,
+    for module in (yolov5, yolov6, yolov7, yolov8, yolov9, yolov10, yolov11, yolo12, yolo26,
                    ppocr, paddledetection):
         for name in dir(module):
             candidate = getattr(module, name)

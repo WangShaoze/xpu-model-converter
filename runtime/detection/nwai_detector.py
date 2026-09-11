@@ -51,6 +51,10 @@ class Detector:
         self.max_det = settings.MAX_DET
         self.num_classes = settings.NUM_CLASSES
         self.layout = settings.OUTPUT_LAYOUT
+        # 输出契约驱动解码器选择; 契约缺失或 layout 不可识别时显式报错(不静默猜测)
+        self.decoder = DecoderFactory.create(
+            settings.OUTPUT_CONTRACT, num_classes=self.num_classes
+        )
         # 注意: 不能命名为 self.preprocess, 否则会覆盖下面的 preprocess() 方法
         self.preprocess_cfg = settings.PREPROCESS
 

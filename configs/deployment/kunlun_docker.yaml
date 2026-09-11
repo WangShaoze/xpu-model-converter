@@ -24,6 +24,9 @@ docker:
   #          minio / kafka_python / urllib3 / certifi / pytz / Cython
   #          onnxruntime(降级占位产物走仿真加载必需, 基础镜像不含)
   packages_dir: "vendor/wheels"
+  # 接口说明书(.docx)与测试图(testimage.*)所在目录: 导出时复制到交付包顶层。
+  # 留空表示不附带; 配置了但目录不存在或没有匹配文件时, 跳过并打印告警。
+  assets_dir: ""
   # 日志上报(minio/kafka)默认地址, 客户现场用 docker run -e 或 install.conf 注入。
   # 不写默认口令, 避免随交付模板泄露。
   log:

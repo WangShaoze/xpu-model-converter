@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """交付层模板渲染。
 
-Dockerfile / build.sh / install.conf / readme.txt / start.sh 全部由模板渲染生成,
-文件名与内容来自同一份 metadata, 从根本上消灭
-``manifest ≠ Dockerfile ≠ README ≠ 实际文件`` 的不一致(建设目标 §15)。
+Dockerfile / build.sh / readme.txt(交付包顶层) 与 start.sh(算法目录内) 全部由
+模板渲染生成, 文件名与内容来自同一份 metadata, 从根本上消灭
+``Dockerfile ≠ README ≠ 实际文件`` 的不一致(建设目标 §15)。
 """
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,12 +18,15 @@ except ImportError:  # pragma: no cover - Jinja2 为必装依赖
     FileSystemLoader = None
     StrictUndefined = None
 
-# 模板文件 -> 交付包内输出文件名
+# 交付包**顶层**模板文件 -> 输出文件名
 TEMPLATE_OUTPUTS: Dict[str, str] = {
     "Dockerfile.j2": "Dockerfile",
     "build.sh.j2": "build.sh",
-    "install.conf.j2": "install.conf",
     "readme.txt.j2": "readme.txt",
+}
+
+# 算法目录内模板文件 -> 输出文件名
+ALGORITHM_TEMPLATE_OUTPUTS: Dict[str, str] = {
     "start.sh.j2": "start.sh",
 }
 
@@ -68,9 +71,10 @@ class TemplateRenderer:
         target.write_text(self.render(template_name, context), encoding="utf-8", newline="\n")
         return str(target)
 
-    def render_all(self, output_dir, context: Dict[str, Any]) -> List[str]:
-        """渲染全部交付层文件, 返回生成的文件路径。"""
+    def render_all(self, output_dir, context: Dict[str, Any],
+                   outputs: Optional[Dict[str, str]] = None) -> List[str]:
+        """渲染一组交付层文件, 返回生成的文件路径。"""
         produced: List[str] = []
-        for template_name, filename in TEMPLATE_OUTPUTS.items():
+        for template_name, filename in (outputs or TEMPLATE_OUTPUTS).items():
             produced.append(self.render_to(template_name, Path(output_dir) / filename, context))
         return produced

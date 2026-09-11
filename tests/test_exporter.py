@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 """Exporter 与公共 Runtime 测试(建设目标 §5 / §6 / §15)。
 
-覆盖三件事:
+覆盖四件事:
 
-1. ``RuntimePackager``: ``runtime.tgz`` 由 ``runtime/common`` 与 ``runtime/<task>``
-   合并平铺而成, 所有模型共用, 且不含 ``__pycache__``;
-2. ``packages/`` 目录: 配置 ``docker.packages_dir`` 时复制本地依赖轮子, 并纳入
-   ``manifest.json`` 的 files/checksums; 未配置时写入占位 README.txt 保证
-   ``COPY packages/`` 不失败;
-3. 交付层一致性(§15): readme.txt 描述的镜像加载方式必须与包内实际内容一致。
+1. ``RuntimePackager``: 公共 Runtime 由 ``runtime/common`` 与 ``runtime/<task>``
+   平铺进**算法目录**, 所有模型共用, 且不含 ``__pycache__``;
+2. ``packages/`` 目录: 配置 ``docker.packages_dir`` 时复制本地依赖轮子; 未配置时
+   写入占位 README.txt 保证 ``COPY packages/`` 不失败;
+3. 交付包结构与客户标准包一致: 顶层 Dockerfile/build.sh/readme.txt + 算法同名目录;
+4. assets_dir: 说明书(.docx)与测试图(testimage.*)复制到交付包顶层, 缺失时告警。
 """
-import json
+import hashlib
 import shutil
 import sys
-import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -26,14 +25,11 @@ from tests import requires_onnx
 from xpu_converter.backend.kunlun import KunlunBackend, KunlunConfig, XpuGraphBuilder
 from xpu_converter.config import BuildManifest, HardwareConfig, ModelConfig
 from xpu_converter.exporter.docker_exporter import DockerExporter, RuntimePackager
-from xpu_converter.exporter.manifest import (
-    ARTIFACT_MANIFEST_FILENAME,
-    MANIFEST_FILENAME,
-    sha256_file,
-)
+from xpu_converter.exporter.manifest import ARTIFACT_MANIFEST_FILENAME, sha256_file
 from xpu_converter.ir import onnx as onnx_ir
 
 INPUT_SHAPE = [1, 3, 32, 32]
+ALGORITHM_DIR = "demo"
 
 
 def build_stub_artifact(workdir: Path):
@@ -71,17 +67,15 @@ class ExporterTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ------------------------------------------------------------------ 公共 Runtime
-    def test_runtime_package_is_model_agnostic(self):
+    def test_runtime_staged_flat_into_algorithm_dir(self):
         packager = RuntimePackager(task="detection", version="v1.0")
-        archive_path = self.tmp / "runtime.tgz"
-        packager.build(str(archive_path))
+        staged = self.tmp / "staged"
+        packager.stage(staged)
+        names = {path.relative_to(staged).as_posix() for path in staged.rglob("*") if path.is_file()}
 
-        with tarfile.open(str(archive_path), "r:gz") as tar:
-            names = {member.name.lstrip("./") for member in tar.getmembers() if member.isfile()}
-
-        # 平铺结构: Runtime 模块直接用顶层 import, 与 service.sh 的 cd 行为一致
-        for expected in ("runtime_server.py", "runtime_settings.py", "service.sh",
-                         "runtime_backend.py", "send_log_webserver.py"):
+        # 平铺结构: Runtime 模块直接平铺到算法目录, 支持顶层 import
+        for expected in ("nwai_webserver.py", "nwai_settings.py", "nwai_gunicorn.py",
+                         "nwai_backend.py", "send_log_webserver.py", "send_log_settings.json"):
             self.assertIn(expected, names)
         self.assertFalse([name for name in names if name.startswith("common/")], names)
         self.assertFalse([name for name in names if "__pycache__" in name], names)
@@ -94,40 +88,27 @@ class ExporterTest(unittest.TestCase):
         self.assertEqual(len(names), expected_count)
 
     def test_runtime_shared_by_all_models(self):
-        """不同模型导出的 runtime.tgz 内容一致(建设目标 §5: Runtime 与模型解耦)。"""
-        first = self.tmp / "shared_a.tgz"
-        second = self.tmp / "shared_b.tgz"
-        RuntimePackager(task="detection", version="v1.0").build(str(first))
-        RuntimePackager(task="detection", version="v1.0").build(str(second))
-        # gzip 头内嵌时间戳, 直接比字节没有意义; 比较成员内容指纹
+        """不同模型导出的 Runtime 内容一致(建设目标 §5: Runtime 与模型解耦)。"""
+        first = self.tmp / "shared_a"
+        second = self.tmp / "shared_b"
+        RuntimePackager(task="detection", version="v1.0").stage(first)
+        RuntimePackager(task="detection", version="v1.0").stage(second)
         self.assertEqual(self._fingerprint(first), self._fingerprint(second))
 
     @staticmethod
-    def _fingerprint(archive_path: Path):
-        import hashlib
-
+    def _fingerprint(directory: Path):
         entries = {}
-        with tarfile.open(str(archive_path), "r:gz") as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                payload = tar.extractfile(member).read()
-                entries[member.name.lstrip("./")] = hashlib.sha256(payload).hexdigest()
+        for path in sorted(Path(directory).rglob("*")):
+            if path.is_file():
+                entries[path.relative_to(directory).as_posix()] = hashlib.sha256(
+                    path.read_bytes()).hexdigest()
         return entries
 
     # ------------------------------------------------------------------ packages/
-    def test_packages_dir_is_copied_and_checksummed(self):
+    def test_packages_dir_is_copied(self):
         package_dir = self._export("pkg_with_wheels", packages_dir=str(self.wheel_dir))
-        packages = package_dir / "packages"
-
-        copied = sorted(path.name for path in packages.iterdir())
+        copied = sorted(path.name for path in (package_dir / "packages").iterdir())
         self.assertEqual(copied, ["flask-3.0.0-py3-none-any.whl", "kafka_python-2.0.2.tar.gz"])
-
-        manifest = json.loads((package_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        for relative in ("packages/flask-3.0.0-py3-none-any.whl",
-                         "packages/kafka_python-2.0.2.tar.gz"):
-            self.assertIn(relative, manifest["files"])
-            self.assertEqual(manifest["checksums"][relative], sha256_file(package_dir / relative))
 
     def test_packages_falls_back_to_hardware_config(self):
         """未显式传 packages_dir 时, 从 hardware_config.docker.packages_dir 读取。"""
@@ -136,24 +117,29 @@ class ExporterTest(unittest.TestCase):
 
     def test_packages_placeholder_when_empty(self):
         package_dir = self._export("pkg_no_wheels")
-        packages = package_dir / "packages"
-        self.assertEqual([path.name for path in packages.iterdir()], ["README.txt"])
-        manifest = json.loads((package_dir / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        self.assertIn("packages/README.txt", manifest["files"])
+        self.assertEqual([path.name for path in (package_dir / "packages").iterdir()], ["README.txt"])
 
-    # ------------------------------------------------------------------ 交付层一致性
-    def test_readme_matches_package_content(self):
-        """§15: readme 中的 docker load / docker build 描述必须与包内实际文件一致。"""
+    # ------------------------------------------------------------------ 交付包结构
+    def test_package_layout_matches_customer_standard(self):
+        package_dir = self._export("pkg_layout")
+        top_level = sorted(path.name for path in package_dir.iterdir())
+        self.assertEqual(top_level, ["Dockerfile", "build.sh", "demo", "packages", "readme.txt"])
+
+        algorithm_dir = package_dir / ALGORITHM_DIR
+        for expected in ("start.sh", "runtime.yaml", "confidence.json", "metadata.json",
+                         ARTIFACT_MANIFEST_FILENAME, "model.yaml",
+                         Path(self.artifact.model_path).name, "nwai_webserver.py"):
+            self.assertTrue((algorithm_dir / expected).is_file(), expected)
+
+        # 旧结构(manifest.json / runtime.tgz / model/ / config/)已移除
+        for legacy in ("manifest.json", "runtime.tgz", "model", "config", "install.conf", "start.sh"):
+            self.assertFalse((package_dir / legacy).exists(), legacy)
+
+    def test_readme_describes_build_and_load(self):
         built = self._export("pkg_build")
         readme = (built / "readme.txt").read_text(encoding="utf-8")
+        self.assertIn("docker load -i 基础镜像.tar", readme)
         self.assertIn("docker build -t demo:v1.0 .", readme)
-        self.assertNotIn("docker load", readme)
-
-        loaded = self._export("pkg_load", image_tar="demo_v1.0.tar")
-        readme = (loaded / "readme.txt").read_text(encoding="utf-8")
-        self.assertIn("docker load -i demo_v1.0.tar", readme)
-        manifest = json.loads((loaded / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-        self.assertEqual(manifest["image"]["tar"], "demo_v1.0.tar")
 
     def test_zip_contains_package_root(self):
         package_dir = self._export("pkg_zip", packages_dir=str(self.wheel_dir))
@@ -163,7 +149,30 @@ class ExporterTest(unittest.TestCase):
             names = {name for name in archive.namelist() if not name.endswith("/")}
         prefix = package_dir.name + "/"
         self.assertTrue(all(name.startswith(prefix) for name in names), names)
-        self.assertTrue(prefix + "manifest.json" in names)
+        self.assertIn(prefix + "Dockerfile", names)
+        self.assertIn(prefix + ALGORITHM_DIR + "/start.sh", names)
+
+    # ------------------------------------------------------------------ assets
+    def test_assets_dir_copies_docx_and_testimage(self):
+        assets = self.tmp / "assets"
+        assets.mkdir()
+        (assets / "接口说明书_v1.0.docx").write_bytes(b"docx")
+        (assets / "testimage.jpg").write_bytes(b"jpg")
+        (assets / "ignored.txt").write_text("忽略", encoding="utf-8")
+
+        package_dir = self._export("pkg_assets", assets_dir=str(assets))
+        copied = sorted(path.name for path in package_dir.iterdir() if path.is_file())
+        self.assertIn("接口说明书_v1.0.docx", copied)
+        self.assertIn("testimage.jpg", copied)
+        self.assertNotIn("ignored.txt", copied)
+
+    def test_missing_assets_dir_warns(self):
+        exporter = self._exporter("pkg_missing_assets", assets_dir=str(self.tmp / "not-exist"))
+        exporter.export(model_path=self.artifact.model_path,
+                        output_dir=str(self.tmp / "pkg_missing_assets"),
+                        artifact=self.artifact)
+        self.assertTrue(exporter.warnings)
+        self.assertIn("assets_dir", exporter.warnings[0])
 
     # ------------------------------------------------------------------ provenance
     def test_artifact_manifest_records_provenance(self):
@@ -171,9 +180,8 @@ class ExporterTest(unittest.TestCase):
         import yaml
 
         package_dir = self._export("pkg_provenance")
-        artifact_path = package_dir / "model" / ARTIFACT_MANIFEST_FILENAME
-        self.assertTrue(artifact_path.is_file())
-        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        algorithm_dir = package_dir / ALGORITHM_DIR
+        payload = self._artifact_payload(algorithm_dir)
         for key in ("converter", "source", "export", "optimization", "backend", "artifact"):
             self.assertIn(key, payload)
         self.assertEqual(payload["artifact"]["file"], Path(self.artifact.model_path).name)
@@ -181,14 +189,19 @@ class ExporterTest(unittest.TestCase):
         self.assertTrue(payload["converter"]["version"])
         self.assertEqual(payload["export"]["input_shape"], list(INPUT_SHAPE))
 
-        model_yaml = yaml.safe_load((package_dir / "model" / "model.yaml").read_text(encoding="utf-8"))
+        model_yaml = yaml.safe_load((algorithm_dir / "model.yaml").read_text(encoding="utf-8"))
         self.assertNotIn("package", model_yaml)
         self.assertNotIn("runtime", model_yaml)
         self.assertIn("source", model_yaml)
 
+    def _artifact_payload(self, algorithm_dir: Path):
+        import json
+
+        return json.loads((algorithm_dir / ARTIFACT_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
     # ------------------------------------------------------------------ 内部
-    def _export(self, name: str, packages_dir=None, docker_packages_dir=None,
-                image_tar=None) -> Path:
+    def _exporter(self, name: str, packages_dir=None, docker_packages_dir=None,
+                  assets_dir=None) -> DockerExporter:
         docker_conf = {"template": "kunlun", "include_packages": True}
         if docker_packages_dir:
             docker_conf["packages_dir"] = docker_packages_dir
@@ -210,25 +223,28 @@ class ExporterTest(unittest.TestCase):
             "runtime": {"type": "detection", "port": 58025},
             "package": {"docker": True},
         })
-
-        output_dir = self.tmp / name
-        exporter = DockerExporter(
+        return DockerExporter(
             manifest=manifest,
             model_config=model_config,
             hardware_config=hardware_config,
             runtime="detection",
             packages_dir=packages_dir,
+            assets_dir=assets_dir,
             # 本用例用 stub 占位产物验证打包机制, 需显式允许降级产物入包
             allow_degraded=True,
         )
+
+    def _export(self, name: str, packages_dir=None, docker_packages_dir=None,
+                assets_dir=None) -> Path:
+        exporter = self._exporter(name, packages_dir, docker_packages_dir, assets_dir)
+        output_dir = self.tmp / name
         exporter.export(
             model_path=self.artifact.model_path,
             output_dir=str(output_dir),
             artifact=self.artifact,
             onnx_path=str(self.onnx_path),
-            image_tar=image_tar,
         )
-        return output_dir / manifest.package_name
+        return output_dir / exporter.manifest.package_name
 
 
 if __name__ == "__main__":

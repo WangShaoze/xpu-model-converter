@@ -8,7 +8,7 @@
 
 我建议**不要推倒重写**。保留现在的大体目录和 CLI，把核心链路做一次 V1.1 重构。
 
----
+***
 
 # 一、我对当前代码的总体评价
 
@@ -32,18 +32,18 @@ xpu_converter
 
 尤其这几个设计值得保留：
 
-* Frontend / Backend 解耦
-* Model Registry
-* Hardware Registry
-* ONNX 作为中间表示
-* Optimizer / Rewrite 独立
-* Accuracy Validator
-* Docker Exporter
-* `manifest.json`
-* Runtime 与模型解耦
-* `runtime.tgz`
-* CLI
-* 测试目录
+- Frontend / Backend 解耦
+- Model Registry
+- Hardware Registry
+- ONNX 作为中间表示
+- Optimizer / Rewrite 独立
+- Accuracy Validator
+- Docker Exporter
+- `manifest.json`
+- Runtime 与模型解耦
+- `runtime.tgz`
+- CLI
+- 测试目录
 
 所以我**不建议推翻现有工程**。
 
@@ -67,7 +67,7 @@ xpu_converter
 | P2 | 缺少真正的 Golden Model / Golden Dataset                          |
 | P2 | CI 目前更多是“结构测试”，不是转换正确性测试                                     |
 
----
+***
 
 # 二、最重要的问题：现在的 `stub` 设计需要改
 
@@ -140,7 +140,7 @@ yolov10_dockerimg_v1.0.zip
 
 这非常危险。
 
----
+***
 
 # 三、必须把“开发模式”和“生产模式”彻底分开
 
@@ -170,7 +170,7 @@ stub
 
 而且：
 
-> **`--allow-degraded` 只能用于开发测试，不能生成可交付 ZIP。**
+> **`--allow-degraded`** **只能用于开发测试，不能生成可交付 ZIP。**
 
 建议：
 
@@ -191,7 +191,7 @@ xpu-converter package \
 
 但生产 CLI 默认绝对不能这样。
 
----
+***
 
 # 四、P0：Kunlun Backend 目前实际上还没有真正实现
 
@@ -243,7 +243,7 @@ compile(output=..., precision=...)
 
 所以这段代码不能继续向下堆。
 
----
+***
 
 # 五、正确修改方式：把 Backend 变成 Capability-driven
 
@@ -304,7 +304,7 @@ class KunlunBackend(BaseBackend):
         return self.adapter.compile(graph, config)
 ```
 
----
+***
 
 # 六、SDK Adapter 不应该“猜 API”
 
@@ -364,7 +364,7 @@ getattr(module, "compile")
 
 这种反射猜测。
 
----
+***
 
 # 七、P0：算子白名单现在不能当真实数据使用
 
@@ -434,7 +434,7 @@ Set[str]
 
 太简单。
 
----
+***
 
 # 八、把 Operator Registry 升级成 Operator Capability
 
@@ -496,7 +496,7 @@ Reason:
 
 这才是真正的 Converter。
 
----
+***
 
 # 九、算子分析顺序必须调整
 
@@ -584,7 +584,7 @@ compile gate
 
 最终只认第二次。
 
----
+***
 
 # 十、建议把 Pipeline 改成这样
 
@@ -617,7 +617,7 @@ Final Capability Check
 
 必须是硬门禁。
 
----
+***
 
 # 十一、P0：YOLOv10 `.pt` 加载器需要重点重构
 
@@ -679,7 +679,7 @@ best.pt
 }
 ```
 
----
+***
 
 # 十二、必须建立 Model Source Contract
 
@@ -731,7 +731,7 @@ input:
 
 > 转换机拥有恢复这个模型所需要的代码和版本。
 
----
+***
 
 # 十三、对于 Ultralytics 模型，增加 Environment Fingerprint
 
@@ -779,7 +779,7 @@ exporter_version
 
 否则半年后你根本无法复现一次转换。
 
----
+***
 
 # 十四、YOLOv10 Adapter 目前还有一个重要问题
 
@@ -847,7 +847,7 @@ model_type == yolov10
 一定是某一种 output
 ```
 
----
+***
 
 # 十五、我建议增加 Output Contract
 
@@ -887,7 +887,7 @@ output:
 
 然后 Runtime 不需要“猜”。
 
----
+***
 
 # 十六、现在 Runtime 的 `_parse_outputs()` 太危险
 
@@ -942,7 +942,7 @@ model.yaml
 
 明确声明。
 
----
+***
 
 # 十七、Runtime 应该变成 Contract-driven
 
@@ -979,7 +979,7 @@ runtime/detection/decoders/
 decoder.decode(outputs)
 ```
 
----
+***
 
 # 十八、P0：当前精度验证还不能证明真正的 XPU 精度
 
@@ -1022,7 +1022,7 @@ ONNX Runtime
 
 > 昆仑 XPU 正确。
 
----
+***
 
 # 十九、V1 应该明确三种 Validation Level
 
@@ -1041,7 +1041,7 @@ Optimized ONNX
 优化 ONNX
 ```
 
----
+***
 
 ## Level 2：Backend Validation
 
@@ -1059,7 +1059,7 @@ Optimized ONNX
 XPU numerical validation
 ```
 
----
+***
 
 ## Level 3：Application Validation
 
@@ -1094,7 +1094,7 @@ mAP
 
 这三级必须区分。
 
----
+***
 
 # 二十、Accuracy Report 建议最终长这样
 
@@ -1124,7 +1124,7 @@ mAP
 }
 ```
 
----
+***
 
 # 二十一、P1：`validation_enabled` 要真正生效
 
@@ -1169,7 +1169,7 @@ OK
 [08] Accuracy Validation SKIPPED
 ```
 
----
+***
 
 # 二十二、Benchmark 也一样
 
@@ -1203,7 +1203,7 @@ ONNXRuntime CPU
 昆仑 XPU 性能
 ```
 
----
+***
 
 # 二十三、Benchmark 必须记录硬件指纹
 
@@ -1236,7 +1236,7 @@ ONNXRuntime CPU
 
 这样才有工程意义。
 
----
+***
 
 # 二十四、P1：Docker Runtime 的 XPU API 也不能继续猜
 
@@ -1296,7 +1296,7 @@ SDK API B
 
 最后转换成功但 Docker 跑不起来。
 
----
+***
 
 # 二十五、建议增加一个 `xpu_runtime` 抽象
 
@@ -1328,7 +1328,7 @@ KunlunSdkAdapter
 
 保证编译和运行使用同一 SDK contract。
 
----
+***
 
 # 二十六、P1：`configs/hardware/kunlun.yaml` 现在混了太多东西
 
@@ -1371,7 +1371,7 @@ configs/
 
 职责清晰很多。
 
----
+***
 
 # 二十七、特别是 Docker 配置不能属于 Hardware Capability
 
@@ -1406,7 +1406,7 @@ deployment/
     kunlun_docker.yaml
 ```
 
----
+***
 
 # 二十八、P1：现在 `manifest.json` 和 `model.yaml` 有职责重叠
 
@@ -1464,7 +1464,7 @@ validation:
 
 不要让两者都成为“唯一事实来源”。
 
----
+***
 
 # 二十九、建议引入 Artifact Manifest
 
@@ -1493,7 +1493,7 @@ manifest.json
 
 这样审计非常清楚。
 
----
+***
 
 # 三十、Artifact metadata 建议扩展
 
@@ -1553,7 +1553,7 @@ manifest.json
 }
 ```
 
----
+***
 
 # 三十一、P1：必须增加 SHA256 的 Source Model Fingerprint
 
@@ -1589,7 +1589,7 @@ Docker Package
 
 你可以直接验证。
 
----
+***
 
 # 三十二、P1：需要增加 Preflight
 
@@ -1658,7 +1658,7 @@ NOT READY
 
 根本不要进入 compile。
 
----
+***
 
 # 三十三、P0：要建立 Capability Matrix
 
@@ -1693,7 +1693,7 @@ capability/
 └── hardware_capability.py
 ```
 
----
+***
 
 # 三十四、优化器目前也需要一个重要原则
 
@@ -1732,7 +1732,7 @@ dtype
 
 继续保持这个思路。
 
----
+***
 
 # 三十五、Optimizer 应该变成 Pass Manager
 
@@ -1764,7 +1764,7 @@ class PassManager:
 }
 ```
 
----
+***
 
 # 三十六、Rewrite 同样要支持“失败回滚”
 
@@ -1812,7 +1812,7 @@ YOLO head rewrite
 
 后面很容易出问题。
 
----
+***
 
 # 三十七、NMS Rewrite 目前不要作为“通用 ONNX Rewrite”
 
@@ -1862,7 +1862,7 @@ raw output
 
 这样更合理。
 
----
+***
 
 # 三十八、推荐新的模块结构
 
@@ -1918,7 +1918,7 @@ xpu_converter/
 └── pipeline/
 ```
 
----
+***
 
 # 三十九、Pipeline 最终应该是这个样子
 
@@ -1991,7 +1991,7 @@ xpu_converter/
               yolov10_xxx_dockerimg_v1.0.zip
 ```
 
----
+***
 
 # 四十、Docker Exporter 这一部分其实已经做得比较好了
 
@@ -2016,7 +2016,7 @@ runtime.tgz
 
 我建议主要做**安全性和可复现性增强**，不要重写。
 
----
+***
 
 # 四十一、Docker 包必须禁止 degraded artifact
 
@@ -2043,7 +2043,7 @@ if artifact.degraded:
 
 才允许。
 
----
+***
 
 # 四十二、你现在的 Docker 默认日志配置存在安全问题
 
@@ -2093,7 +2093,7 @@ install.conf
 
 但也不要提交默认密码。
 
----
+***
 
 # 四十三、Runtime 的 CPU fallback 也应该更严格
 
@@ -2141,7 +2141,7 @@ ONNX / stub
 
 > 客户部署失败时，系统悄悄 CPU 跑起来，性能突然掉 100 倍，排查非常困难。
 
----
+***
 
 # 四十四、最终 Runtime 规则
 
@@ -2175,7 +2175,7 @@ artifact_format = onnx
 DEVICE=cpu
 ```
 
----
+***
 
 # 四十五、当前测试体系需要升级
 
@@ -2228,7 +2228,7 @@ tests/
     └── kunlun
 ```
 
----
+***
 
 # 四十六、测试必须增加四层
 
@@ -2242,7 +2242,7 @@ Graph
 Rewrite
 ```
 
----
+***
 
 ## ONNX Integration
 
@@ -2254,7 +2254,7 @@ ONNX
 ONNX Runtime
 ```
 
----
+***
 
 ## Kunlun Integration
 
@@ -2268,7 +2268,7 @@ Kunlun Compiler
 XPU
 ```
 
----
+***
 
 ## E2E
 
@@ -2290,7 +2290,7 @@ curl /predict
 
 这是最终交付的验收测试。
 
----
+***
 
 # 四十七、我建议建立 Golden Model
 
@@ -2336,7 +2336,7 @@ NMS
 
 不会把 YOLO 搞坏。
 
----
+***
 
 # 四十八、你当前的 `images/yolov5-test-images` 也应该升级
 
@@ -2360,7 +2360,7 @@ tests/assets/
 
 不要绑定具体 YOLO 版本。
 
----
+***
 
 # 四十九、模型配置也需要收敛
 
@@ -2415,7 +2415,7 @@ available_model_types()
 status: experimental
 ```
 
----
+***
 
 # 五十、模型 Registry 应该支持生命周期状态
 
@@ -2453,7 +2453,7 @@ yolov11     PyTorch      EXPERIMENTAL
 ppocr       Paddle       PLANNED
 ```
 
----
+***
 
 # 五十一、我建议你把 V1 的范围重新锁死
 
@@ -2517,7 +2517,7 @@ Deployment:
 experimental
 ```
 
----
+***
 
 # 五十二、最终我建议把版本规划成这样
 
@@ -2543,7 +2543,7 @@ Accuracy
 Docker
 ```
 
----
+***
 
 ## V1.1
 
@@ -2563,7 +2563,7 @@ multiple resolutions
 multi-device
 ```
 
----
+***
 
 ## V1.2
 
@@ -2574,7 +2574,7 @@ INT8
 calibration
 ```
 
----
+***
 
 ## V2.0
 
@@ -2588,7 +2588,7 @@ PaddleOCR
 PaddleDetection
 ```
 
----
+***
 
 # 五十三、我给当前项目的修改优先级
 
@@ -2644,7 +2644,7 @@ YOLOv10 checkpoint loading
 三层 Accuracy Validation
 ```
 
----
+***
 
 # 五十四、P1
 
@@ -2662,7 +2662,7 @@ Config split
 Manifest split
 ```
 
----
+***
 
 # 五十五、P2
 
@@ -2678,13 +2678,13 @@ Paddle
 OCR
 ```
 
----
+***
 
 # 五十六、我建议你不要马上让我“重写所有代码”
 
 最合理的开发方式是分 **4 个 Commit / Sprint**。
 
----
+***
 
 ## Sprint 1：把“假转换器”变成“严谨转换器”
 
@@ -2720,7 +2720,7 @@ Preflight
 Final Operator Check
 ```
 
----
+***
 
 # 五十七、Sprint 2：真正把 YOLOv10 打通
 
@@ -2749,7 +2749,7 @@ Raw detection
 
 这里是整个项目最核心的算法部分。
 
----
+***
 
 # 五十八、Sprint 3：接真实昆仑 SDK
 
@@ -2782,7 +2782,7 @@ model.xpu
 
 真正落地。
 
----
+***
 
 # 五十九、Sprint 4：Docker 交付
 
@@ -2815,7 +2815,7 @@ docker run
 
 E2E。
 
----
+***
 
 # 六十、最终验收标准
 
@@ -2869,7 +2869,7 @@ XPU throughput
 
 是真实硬件数据。
 
----
+***
 
 # 六十一、最后给你一个我认为最重要的架构调整
 
@@ -2937,7 +2937,7 @@ Backend
 
 **这个版本我认为就已经可以作为正式项目的技术基线。**
 
----
+***
 
 ## 现在这份代码我建议不要推倒
 
@@ -2976,4 +2976,4 @@ Artifact
 
 另外，我这次实际运行了项目测试：当前环境没有安装 `onnx`，所以 26 个测试中有 24 个因依赖缺失直接 ERROR；Python 源码本身可以通过 `py_compile`。这意味着**当前测试失败首先是测试环境依赖问题，但也暴露出测试依赖分层不够完善**。下一版应该把 `onnx/onnxruntime` 集成测试和纯 Python unit test 分开。
 
-**下一步最合适的工作不是继续写泛泛的设计文档，而是直接进入代码级改造：我可以按照上面 P0 → P1 的顺序，基于你这份 `xpu-model-converter.zip`，逐个文件给出“现有代码 → 修改后代码”的具体方案，第一批先改 `pipeline.py + backend/base.py + Kunlun Backend + operator capability + YOLOv10 Adapter/Output Contract`，并给出可以直接替换进仓库的代码。**
+**下一步最合适的工作不是继续写泛泛的设计文档，而是直接进入代码级改造：我可以按照上面 P0 → P1 的顺序，基于你这份** **`xpu-model-converter.zip`，逐个文件给出“现有代码 → 修改后代码”的具体方案，第一批先改** **`pipeline.py + backend/base.py + Kunlun Backend + operator capability + YOLOv10 Adapter/Output Contract`，并给出可以直接替换进仓库的代码。**

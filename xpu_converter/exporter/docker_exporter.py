@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """Docker 交付包导出(建设目标 §6 / §8)。
 
-产出的包结构与 ``yolov9t_dockerimg_v1.0.zip`` 保持交付层兼容, 并补齐
-``manifest.json`` / ``runtime.tgz`` / ``model.yaml`` / ``config/runtime.yaml``:
+产出结构与客户标准包(``nwai*-dockerimg_v*``)保持一致:
 
-    <package_name>/
-    ├── Dockerfile / build.sh / install.conf / readme.txt / start.sh
-    ├── packages/
-    ├── runtime.tgz
-    ├── model/{<产物文件>, model.yaml, metadata.json}
-    ├── config/{confidence.json, runtime.yaml}
-    └── manifest.json
+    <package_name>/                 # <算法名>-dockerimg_<版本>
+    ├── Dockerfile / build.sh / readme.txt
+    ├── packages/                   # 额外依赖轮子(可为空)
+    ├── testimage.jpg               # 可选(来自 assets_dir)
+    ├── <说明书>.docx                # 可选(来自 assets_dir)
+    └── <算法名>/                    # 算法目录(与代码/模型平铺)
+        ├── <Runtime 代码>          # nwai_*.py + send_log_webserver.py
+        ├── send_log_settings.json
+        ├── runtime.yaml / confidence.json
+        ├── metadata.json / artifact.json / model.yaml
+        ├── <模型产物文件>
+        └── start.sh
 
-``model/`` 下的产物文件由编译产物决定(单文件如 ``model.onnx``, Paddle 静态图为
-``model.pdmodel`` + ``model.pdiparams``), 全部复制并由 manifest.json 记录。
+算法目录内的模型产物由编译产物决定(单文件如 ``model.onnx``, Paddle 静态图为
+``model.pdmodel`` + ``model.pdiparams``), 全部复制并由 ``artifact.json`` 记录。
 """
 import json
 import shutil
@@ -28,20 +32,16 @@ from xpu_converter.exporter.manifest import (
     ARTIFACT_FILENAME,
     ARTIFACT_MANIFEST_FILENAME,
     CONFIDENCE_FILENAME,
-    MANIFEST_FILENAME,
     METADATA_FILENAME,
     MODEL_YAML_FILENAME,
-    RUNTIME_TGZ_FILENAME,
     RUNTIME_YAML_FILENAME,
     PackageManifest,
     build_artifact_manifest,
-    build_checksums,
     build_manifest,
-    collect_files,
 )
-from xpu_converter.exporter.template import TemplateRenderer
-from xpu_converter.paths import home_dir
-from xpu_converter.paths import runtime_dir
+from xpu_converter.exporter.template import ALGORITHM_TEMPLATE_OUTPUTS, TemplateRenderer
+from xpu_converter.logging_utils import get_logger
+from xpu_converter.paths import home_dir, runtime_dir
 from xpu_converter.version import CONVERTER_VERSION, RUNTIME_API_VERSION
 
 RUNTIME_COMMON_DIR = "common"
@@ -62,24 +62,20 @@ def artifact_files(model_path: str, artifact: Optional[Any]) -> List[Path]:
 
 
 def artifact_model_filename(model_files: List[Path]) -> str:
-    """交付包 ``model/`` 内的主产物文件名(runtime.yaml / manifest 引用它)。"""
+    """算法目录内的主产物文件名(runtime.yaml / artifact.json 引用它)。"""
     return model_files[0].name if model_files else ARTIFACT_FILENAME
 
 
 class RuntimePackager:
-    """交付产物 ②: 公共 Runtime 打包。
+    """交付产物 ②: 公共 Runtime 代码投放。
 
-    把 ``runtime/common`` 与 ``runtime/<task>`` 合并为**一套与模型无关的 Runtime**,
-    所有 YOLO 模型共用同一份 ``runtime.tgz``(建设目标 §5/§10)。
+    把 ``runtime/common`` 与 ``runtime/<task>`` 平铺到**算法目录**下, 所有模型
+    共用同一套与模型无关的 Runtime(建设目标 §5/§10)。
     """
 
     def __init__(self, task: str = DEFAULT_RUNTIME_TASK, version: str = "v1.0") -> None:
         self.task = task or DEFAULT_RUNTIME_TASK
         self.version = version
-
-    @property
-    def name(self) -> str:
-        return "runtime-{}-{}".format(self.task, self.version)
 
     def source_dirs(self) -> List[Path]:
         root = runtime_dir()
@@ -103,20 +99,6 @@ class RuntimePackager:
                 shutil.copyfile(path, destination)
         return sorted(path.relative_to(target).as_posix() for path in target.rglob("*") if path.is_file())
 
-    def build(self, output_path) -> str:
-        """生成 ``runtime.tgz``(tar.gz)。"""
-        import tarfile
-        import tempfile
-
-        output = Path(output_path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory() as tmp:
-            stage_dir = Path(tmp) / self.name
-            self.stage(stage_dir)
-            with tarfile.open(str(output), "w:gz") as tar:
-                tar.add(str(stage_dir), arcname=".")
-        return str(output)
-
 
 class DockerExporter:
     """把编译产物封装成可直接交付的 Docker ZIP。"""
@@ -128,6 +110,7 @@ class DockerExporter:
         hardware_config: Optional[HardwareConfig] = None,
         runtime: str = DEFAULT_RUNTIME_TASK,
         packages_dir: Optional[str] = None,
+        assets_dir: Optional[str] = None,
         converter_version: str = CONVERTER_VERSION,
         allow_degraded: bool = False,
     ) -> None:
@@ -135,23 +118,30 @@ class DockerExporter:
         self.model_config = model_config or ModelConfig.from_dict(self.manifest.to_model_override())
         self.hardware_config = hardware_config or HardwareConfig()
         self.runtime = runtime or DEFAULT_RUNTIME_TASK
+        docker_conf = dict(self.hardware_config.docker or {})
         if packages_dir is None:
-            # 未显式指定时回退到 configs/hardware/*.yaml 的 docker.packages_dir
-            packages_dir = (self.hardware_config.docker or {}).get("packages_dir") or None
-        self.packages_dir = self._resolve_packages_dir(packages_dir)
+            # 未显式指定时回退到 configs/deployment/*.yaml 的 docker.packages_dir
+            packages_dir = docker_conf.get("packages_dir") or None
+        if assets_dir is None:
+            # 说明书 .docx / testimage.jpg 所在目录, 见 docker.assets_dir
+            assets_dir = docker_conf.get("assets_dir") or None
+        self.packages_dir = self._resolve_dir(packages_dir)
+        self.assets_dir = self._resolve_dir(assets_dir)
         self.converter_version = converter_version
         # 是否允许把 degraded(占位)产物封装成正式交付包。默认禁止, 仅 --dev-package 打开。
         self.allow_degraded = bool(allow_degraded)
+        # 资产缺失等非致命问题, 供调用方打印
+        self.warnings: List[str] = []
 
     @staticmethod
-    def _resolve_packages_dir(value: Optional[str]) -> Optional[str]:
-        """规范化为绝对路径: 相对路径以项目根为基准, 目录不存在则视为未配置。"""
+    def _resolve_dir(value: Optional[str]) -> Optional[Path]:
+        """规范化为绝对路径: 相对路径以项目根为基准(不校验存在性)。"""
         if not value:
             return None
         path = Path(value)
         if not path.is_absolute():
             path = home_dir() / path
-        return str(path) if path.is_dir() else None
+        return path
 
     # ------------------------------------------------------------------ 主流程
     def export(
@@ -190,40 +180,36 @@ class DockerExporter:
             shutil.rmtree(package_dir)
         package_dir.mkdir(parents=True)
 
-        runtime_packager = RuntimePackager(task=self.runtime, version=self.manifest.version)
-        runtime_tgz = package_dir / RUNTIME_TGZ_FILENAME
-        runtime_packager.build(runtime_tgz)
+        # 算法同名目录: Runtime 代码 + 配置 + 模型产物 + start.sh 平铺于此
+        algorithm_dir = package_dir / self.manifest.name
+        algorithm_dir.mkdir(parents=True, exist_ok=True)
 
-        self._write_model_dir(package_dir, model_files, artifact, onnx_path,
-                              optimization_report, hardware_capability)
-        self._write_config_dir(package_dir, model_filename)
+        RuntimePackager(task=self.runtime, version=self.manifest.version).stage(algorithm_dir)
+        self._write_algorithm_dir(algorithm_dir, model_files, artifact, onnx_path,
+                                  optimization_report, hardware_capability)
+        self._write_config(algorithm_dir, model_filename)
         self._write_packages_dir(package_dir)
+        self._write_assets(package_dir)
 
-        package_manifest = self._build_package_manifest(package_dir, artifact, accuracy, benchmark,
-                                                        runtime_packager, image_tar, model_filename)
+        package_manifest = self._build_package_manifest(artifact, accuracy, benchmark,
+                                                        image_tar, model_filename)
         context = self._template_context(package_manifest, model_filename)
-        TemplateRenderer(self.hardware_config.name).render_all(package_dir, context)
-        self._make_executable(package_dir)
+        renderer = TemplateRenderer(self.hardware_config.name)
+        renderer.render_all(package_dir, context)
+        renderer.render_all(algorithm_dir, context, outputs=ALGORITHM_TEMPLATE_OUTPUTS)
+        self._make_executable(package_dir, ("build.sh",))
+        self._make_executable(algorithm_dir, ("start.sh",))
 
-        # files/checksums 覆盖除 manifest.json 之外的全部交付内容
-        files = collect_files(package_dir, exclude=[MANIFEST_FILENAME])
-        package_manifest.files = files
-        package_manifest.checksums = build_checksums(package_dir, files)
-        package_manifest.save(package_dir / MANIFEST_FILENAME)
-
-        zip_path = self._zip(package_dir, root)
-        return zip_path
+        return self._zip(package_dir, root)
 
     # ------------------------------------------------------------------ 子步骤
-    def _write_model_dir(self, package_dir: Path, model_files: List[Path],
-                         artifact: Optional[Any], onnx_path: Optional[str],
-                         optimization_report: Optional[Any] = None,
-                         hardware_capability: Optional[Any] = None) -> None:
-        model_dir = package_dir / "model"
-        model_dir.mkdir(parents=True, exist_ok=True)
+    def _write_algorithm_dir(self, algorithm_dir: Path, model_files: List[Path],
+                             artifact: Optional[Any], onnx_path: Optional[str],
+                             optimization_report: Optional[Any] = None,
+                             hardware_capability: Optional[Any] = None) -> None:
         # Paddle 静态图由 .pdmodel + .pdiparams 两个文件组成, 必须一起复制
         for path in model_files:
-            shutil.copyfile(str(path), model_dir / path.name)
+            shutil.copyfile(str(path), algorithm_dir / path.name)
 
         metadata: Dict[str, Any] = {
             "model_name": self.manifest.name,
@@ -252,7 +238,7 @@ class DockerExporter:
         }
         if onnx_path:
             metadata["metadata"]["onnx_source"] = Path(onnx_path).name
-        with open(model_dir / METADATA_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
+        with open(algorithm_dir / METADATA_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(metadata, fw, ensure_ascii=False, indent=2)
 
         # artifact.json: 产物自身的来源与编译信息(ChatGPT 修改意见 §29/§30)
@@ -265,11 +251,11 @@ class DockerExporter:
             optimization=self._optimization_spec(optimization_report),
             hardware=hardware_capability,
         )
-        with open(model_dir / ARTIFACT_MANIFEST_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
+        with open(algorithm_dir / ARTIFACT_MANIFEST_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(artifact_manifest, fw, ensure_ascii=False, indent=2)
 
-        # model.yaml: 只描述"如何产生这个模型"(§28), 包内容由 manifest.json 负责
-        dump_yaml(self.manifest.to_model_yaml(), model_dir / MODEL_YAML_FILENAME)
+        # model.yaml: 只描述"如何产生这个模型"(§28)
+        dump_yaml(self.manifest.to_model_yaml(), algorithm_dir / MODEL_YAML_FILENAME)
 
     def _optimization_spec(self, optimization_report: Optional[Any]) -> Dict[str, Any]:
         spec: Dict[str, Any] = {"level": int(self.hardware_config.optimization_level)}
@@ -277,10 +263,7 @@ class DockerExporter:
             spec.update(optimization_report.to_dict())
         return spec
 
-    def _write_config_dir(self, package_dir: Path, model_filename: str) -> None:
-        config_dir = package_dir / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-
+    def _write_config(self, algorithm_dir: Path, model_filename: str) -> None:
         class_names = list(self.model_config.class_names) or coco_classes()
         conf_thres = float(self.model_config.postprocess.get("conf_thres", 0.25))
         confidence = [
@@ -293,17 +276,17 @@ class DockerExporter:
             }
             for index, name in enumerate(class_names)
         ]
-        with open(config_dir / CONFIDENCE_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
+        with open(algorithm_dir / CONFIDENCE_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(confidence, fw, ensure_ascii=False, indent=2)
 
-        dump_yaml(self._runtime_yaml(class_names, model_filename), config_dir / RUNTIME_YAML_FILENAME)
+        dump_yaml(self._runtime_yaml(class_names, model_filename), algorithm_dir / RUNTIME_YAML_FILENAME)
 
     def _write_packages_dir(self, package_dir: Path) -> None:
         packages = package_dir / "packages"
         packages.mkdir(parents=True, exist_ok=True)
         copied = 0
-        if self.packages_dir and Path(self.packages_dir).is_dir():
-            for path in sorted(Path(self.packages_dir).iterdir()):
+        if self.packages_dir is not None and self.packages_dir.is_dir():
+            for path in sorted(self.packages_dir.iterdir()):
                 if path.is_file() and path.suffix in (".whl", ".gz", ".zip"):
                     shutil.copyfile(path, packages / path.name)
                     copied += 1
@@ -315,6 +298,27 @@ class DockerExporter:
                 encoding="utf-8",
                 newline="\n",
             )
+
+    def _write_assets(self, package_dir: Path) -> None:
+        """把 assets 目录下的接口说明书(.docx)与 testimage.* 复制到交付包顶层。"""
+        if self.assets_dir is None:
+            return
+        if not self.assets_dir.is_dir():
+            self._warn("assets_dir 不存在, 已跳过说明书/测试图: {}".format(self.assets_dir))
+            return
+        copied = 0
+        for path in sorted(self.assets_dir.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() == ".docx" or path.stem.lower().startswith("testimage"):
+                shutil.copyfile(path, package_dir / path.name)
+                copied += 1
+        if copied == 0:
+            self._warn("assets_dir 内未找到 .docx / testimage.*, 已跳过: {}".format(self.assets_dir))
+
+    def _warn(self, message: str) -> None:
+        self.warnings.append(message)
+        get_logger().warning(message)
 
     def _runtime_yaml(self, class_names: List[str], model_filename: str) -> Dict[str, Any]:
         runtime_conf = dict(self.hardware_config.runtime or {})
@@ -339,6 +343,8 @@ class DockerExporter:
             },
             "preprocess": dict(self.model_config.preprocess),
             "postprocess": dict(self.model_config.postprocess),
+            # 输出契约: 由转换器对真实 ONNX 探测后写入, 供 Runtime 解码器选择布局
+            "output": dict(self.model_config.output),
             "num_classes": int(self.model_config.num_classes),
             "class_names": list(class_names),
             "runtime": {
@@ -352,9 +358,8 @@ class DockerExporter:
             "logging": {"process_log": "/tmp/nwai_log/process.log"},
         }
 
-    def _build_package_manifest(self, package_dir: Path, artifact: Optional[Any],
+    def _build_package_manifest(self, artifact: Optional[Any],
                                 accuracy: Optional[Any], benchmark: Optional[Any],
-                                runtime_packager: RuntimePackager,
                                 image_tar: Optional[str],
                                 model_filename: str) -> PackageManifest:
         runtime_conf = dict(self.hardware_config.runtime or {})
@@ -397,12 +402,6 @@ class DockerExporter:
             }, **{k: self.manifest.source.get(k) for k in SOURCE_FINGERPRINT_KEYS if self.manifest.source.get(k)}),
             validation=validation,
             benchmark=benchmark_payload,
-            runtime_package={
-                "name": runtime_packager.name,
-                "file": RUNTIME_TGZ_FILENAME,
-                "api_version": RUNTIME_API_VERSION,
-                "shared": True,
-            },
             image={
                 "name": self.manifest.name,
                 "tag": self.manifest.version,
@@ -418,6 +417,8 @@ class DockerExporter:
         return {
             "package_name": package_manifest.package_name,
             "package_version": package_manifest.package_version,
+            "algorithm_name": package_manifest.model_name,
+            "algorithm_dir": self.manifest.name,
             "model_name": package_manifest.model_name,
             "model_version": package_manifest.model_version,
             "model_file": model_filename,
@@ -429,20 +430,13 @@ class DockerExporter:
             "degraded": package_manifest.degraded,
             "converter_version": self.converter_version,
             "base_image": self.hardware_config.base_image,
-            "gpu_id": 0,
             "workers": int(runtime_conf.get("workers", 1)),
-            "device": self.hardware_config.device,
             "web_port": package_manifest.web_port,
             "host_ip": "127.0.0.1",
-            "conf_thres": float(runtime_conf.get("conf_thres", 0.25)),
-            "iou_thres": float(runtime_conf.get("iou_thres", 0.45)),
-            "algorithm_name": package_manifest.model_name,
-            "algorithm_version": package_manifest.model_version,
             "image_name": package_manifest.image_name,
             "image_tag": package_manifest.image_tag,
             "image_full": package_manifest.image_full,
             "container_name": package_manifest.container_name,
-            "image_tar": package_manifest.image_tar,
             "class_count": int(self.model_config.num_classes),
             # 日志上报地址留空: 现场通过 docker run -e 或 install.conf 注入, 不落默认口令
             "minio_host": log_conf.get("minio_host", ""),
@@ -456,11 +450,11 @@ class DockerExporter:
         }
 
     @staticmethod
-    def _make_executable(package_dir: Path) -> None:
+    def _make_executable(directory: Path, names) -> None:
         import stat
 
-        for name in ("build.sh", "start.sh"):
-            path = package_dir / name
+        for name in names:
+            path = directory / name
             if not path.is_file():
                 continue
             try:

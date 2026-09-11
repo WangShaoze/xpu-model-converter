@@ -3,7 +3,7 @@
 
 ChatGPT 修改意见 §16 / §17: 过去 ``_parse_outputs`` 用
 ``shape[-1] == 6`` / ``shape[0] < shape[1]`` 这类启发式猜布局, 一旦猜错
-就是"能跑但结果错"。现在布局由 ``config/runtime.yaml`` 的 ``output`` 段
+就是"能跑但结果错"。现在布局由算法目录下 ``runtime.yaml`` 的 ``output`` 段
 (由转换器在导出后对真实 ONNX 探测得到)显式声明, 本模块据其选择解码器。
 
 布局定义与 ``xpu_converter.contract.output`` 一致:

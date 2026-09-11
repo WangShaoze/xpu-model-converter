@@ -32,4 +32,4 @@ validation:
 
 package:
   docker: true
-  name: yolov10n_dockerimg_v1.0
+  name: yolov10n-dockerimg_v1.0

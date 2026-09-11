@@ -117,6 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
     package_parser.add_argument("--runtime", default=None, help="Runtime 类型, 默认 detection")
     package_parser.add_argument("--image-tar", dest="image_tar", default=None,
                                 help="包内已有的镜像 tar 文件名(README 据此描述部署方式)")
+    package_parser.add_argument("--assets-dir", dest="assets_dir", default=None,
+                                help="接口说明书(.docx)/testimage.* 所在目录, 导出时复制到交付包顶层")
     package_parser.add_argument("--dev-package", dest="dev_package", action="store_true",
                                 help="允许把 degraded 占位产物打入 Docker 交付包(仅供开发联调, 默认禁止)")
     package_parser.set_defaults(handler=cmd_package)

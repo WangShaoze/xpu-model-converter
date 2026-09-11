@@ -41,7 +41,7 @@ def cmd_package(args) -> int:
         "runtime": {"type": getattr(args, "runtime", None) or model_config.task,
                     "port": int(config.runtime.get("port", 58025))},
         "validation": {"enabled": False, "dataset": ""},
-        "package": {"docker": True, "name": "{}_dockerimg_{}".format(name, version)},
+        "package": {"docker": True, "name": "{}-dockerimg_{}".format(name, version)},
     })
 
     exporter = DockerExporter(
@@ -49,6 +49,7 @@ def cmd_package(args) -> int:
         model_config=model_config,
         hardware_config=config,
         runtime=getattr(args, "runtime", None) or model_config.task,
+        assets_dir=getattr(args, "assets_dir", None),
         allow_degraded=bool(getattr(args, "dev_package", False)),
     )
     output_dir = getattr(args, "output", None) or "./package"
@@ -70,6 +71,8 @@ def cmd_package(args) -> int:
         "镜像名": "{}:{}".format(name, version),
         "Web 端口": config.runtime.get("port", 58025),
     })
+    for warning in exporter.warnings:
+        print("  ! {}".format(warning))
     for note in artifact.notes:
         print("  ! {}".format(note))
     if artifact.degraded:

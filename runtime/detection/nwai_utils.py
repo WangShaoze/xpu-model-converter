@@ -3,14 +3,14 @@
 
 输出格式与客户 v1.4 规范一致:
 ``data=[{title, code, left, top, right, bottom, confidence}, ...]``
-类别、导出编号与阈值全部来自交付包 ``config/confidence.json``, 与模型代码解耦。
+类别、导出编号与阈值全部来自交付包算法目录下 ``confidence.json``, 与模型代码解耦。
 """
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import runtime_config
-from runtime_tools import ExceptionMessage
+import nwai_config
+from nwai_tools import ExceptionMessage
 
 CUR_DIR = os.path.abspath(os.path.dirname(__file__))
 _RESULT_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
@@ -21,7 +21,7 @@ class NwaiUtils:
 
     def __init__(self) -> None:
         self.confidence_list: List[Dict[str, Any]] = []
-        self.confidence_path = runtime_config.confidence_path()
+        self.confidence_path = nwai_config.confidence_path()
 
     # ------------------------------------------------------------------ 置信度表
     def load_confidence(self) -> Tuple[bool, str]:

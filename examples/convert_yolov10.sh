@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一条命令完成: best.pt -> ONNX -> XPU -> Docker 交付包(建设目标 §2)
 #
-# 最终产出: ./output/yolov10n_dockerimg_v1.0.zip
+# 最终产出: ./output/yolov10n-dockerimg_v1.0.zip
 set -euo pipefail
 
 xpu-converter convert \

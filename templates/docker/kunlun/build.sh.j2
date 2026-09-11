@@ -1,115 +1,393 @@
-#!/bin/bash
+#!/bin/sh
 # =====================================================================
 # {{ package_name }} 算法组件自动部署脚本
-# (由 xpu-model-converter docker_export 渲染生成, 请勿手工修改)
+# (由 xpu-model-converter 渲染生成, 请勿手工修改)
 #
-# 功能: 使用本目录 Dockerfile 构建算法镜像并启动容器
 # 用法:
-#   sh build.sh [install|-i|--install]   # 安装: 删除旧容器/镜像后构建并启动(默认)
-#   sh build.sh [stop|-s|--stop]         # 停止并删除容器
-#   sh build.sh [restart|-r|--restart]   # 重启容器
-#   sh build.sh [delete|-d|--delete]     # 删除容器与镜像
-#   sh build.sh [help|-h|--help]         # 用法说明
+#   sh build.sh             # 安装(默认): 删除旧容器/镜像后构建并启动
+#   sh build.sh -i          # 同上
+#   sh build.sh -r          # 重启容器
+#   sh build.sh -stop       # 停止容器
+#   sh build.sh -d          # 删除容器与镜像
+#   sh build.sh -h          # 用法说明
 # 说明:
-#   - 部署参数(端口/卡号/并发/上报地址等)在 Dockerfile 的 ENV 中, 可改后重新 install
-#   - docker run 时也可追加 -e 参数覆盖, 例如: -e WEB_PORT={{ web_port }} -e workers=2
-#   - 昆仑芯 XPU 服务器带 --privileged --device=/dev/xpuctrl 启动;
-#     若目标机无该设备节点, 脚本会自动去掉该参数并以 CPU 模式启动
+#   - 部署参数在本目录 Dockerfile 的 ENV 中, 改后重新执行 install 生效;
+#     若存在平台生成的 install.conf, 脚本会自动用其中配置覆盖 Dockerfile 的 ENV。
+#   - 昆仑芯 XPU 服务器带 --privileged --device=/dev/xpuctrl 启动
 # =====================================================================
 
-image_name="{{ image_name }}"
-image_tag="{{ image_tag }}"
-image_full="${image_name}:${image_tag}"
-container_name="{{ container_name }}"
+# 定义算法包相关信息版本号、算法镜像名称，算法包的容器名称，算法包使用的端口号
+algorithm_name="{{ algorithm_name }}"
+version="{{ package_version }}"
+port="{{ web_port }}"
+container_name=$algorithm_name"_"$version
+image_name=$algorithm_name":"$version
 
-# 从 Dockerfile 读取默认端口
-web_port=$(grep -oP "(?<=ENV WEB_PORT=).*" Dockerfile | tr -d '\n\r')
+echo "算法名称: $algorithm_name"
+echo "容器名称: $container_name"
+echo "版本号:   $version"
+echo "端口号:   $port"
+echo "算法镜像: $image_name"
 
-# 昆仑芯 XPU 服务器需要 --device=/dev/xpuctrl; 若该设备节点不存在,
-# docker run 会直接报错退出, 因此这里按实际设备探测, 无卡机器自动降级 CPU 运行
-if [ -e /dev/xpuctrl ]; then
-    devices_params="--privileged --device=/dev/xpuctrl"
+# 默认端口映射
+port_param="-p $port:$port"
+
+# docker run启动额外参数
+docker_run_param=""
+
+# 获取Dockerfile中基础镜像名称:版本
+base_image=$(grep -oP "(?<=FROM ).*" Dockerfile | tr -d '\n\r')
+echo "基础镜像: $base_image"
+if docker image inspect $base_image > /dev/null 2>&1; then
+    echo "机器已经安装基础镜像:$base_image"
 else
-    devices_params="--privileged"
-    echo "!! 未检测到 /dev/xpuctrl 设备节点, 将以 CPU 模式启动容器"
+    echo "构建失败.错误原因: 机器未安装基础镜像:$base_image.请从功能[推理镜像管理]安装该镜像."
+    exit -1
 fi
 
-help_info() {
-    cat <<EOF
-用法:
-  sh build.sh [install|-i|--install]   # 安装(默认): 删除旧版本容器和镜像后构建并启动
-  sh build.sh [stop|-s|--stop]         # 停止并删除当前容器
-  sh build.sh [restart|-r|--restart]   # 重启当前容器
-  sh build.sh [delete|-d|--delete]     # 删除容器与镜像
-  sh build.sh [help|-h|--help]         # 用法说明
-EOF
-}
+# 通过推理平台安装的配置文件
+file_path='./install.conf'
 
-cmd=$1
-case "$cmd" in
-""|install|-i|--install) action=install ;;
-stop|-s|--stop) action=stop ;;
-restart|-r|--restart) action=restart ;;
-delete|-d|--delete) action=delete ;;
-help|-h|--help|*) action=help ;;
+# 判断配置文件是否存在
+if [ -f "$file_path" ]; then
+    # 读取配置文件内指定变量
+    GPU_ID=$(grep -oP "(?<=GPU_ID=).*" install.conf | tr -d '\n\r')
+    HOST_IP=$(grep -oP "(?<=HOST_IP=).*" install.conf | tr -d '\n\r')
+    WORKERS=$(grep -oP "(?<=WORKERS=).*" install.conf | tr -d '\n\r')
+    MINIO_HOST=$(grep -oP "(?<=MINIO_HOST=).*" install.conf | tr -d '\n\r')
+    MINIO_PORT=$(grep -oP "(?<=MINIO_PORT=).*" install.conf | tr -d '\n\r')
+    MINIO_BUCKET=$(grep -oP "(?<=MINIO_BUCKET=).*" install.conf | tr -d '\n\r')
+    MINIO_ACCESS_KEY=$(grep -oP "(?<=MINIO_ACCESS_KEY=).*" install.conf | tr -d '\n\r')
+    MINIO_SECRET_KEY=$(grep -oP "(?<=MINIO_SECRET_KEY=).*" install.conf | tr -d '\n\r')
+    KAFKA_HOST=$(grep -oP "(?<=KAFKA_HOST=).*" install.conf | tr -d '\n\r')
+    KAFKA_PORT=$(grep -oP "(?<=KAFKA_PORT=).*" install.conf | tr -d '\n\r')
+    KAFKA_TOPIC=$(grep -oP "(?<=KAFKA_TOPIC=).*" install.conf | tr -d '\n\r')
+    DOCKER_RUN_ADDI_PARAMS=$(grep -oP "(?<=DOCKER_RUN_ADDI_PARAMS=).*" install.conf | tr -d '\n\r')
+    PROVINCE_CODE=$(grep -oP "(?<=PROVINCE_CODE=).*" install.conf | tr -d '\n\r')
+    BUREAU_CODE=$(grep -oP "(?<=BUREAU_CODE=).*" install.conf | tr -d '\n\r')
+    REGION_CODE=$(grep -oP "(?<=REGION_CODE=).*" install.conf | tr -d '\n\r')
+
+    # 修改Dockerfile内的指定变量
+    if [ -z $GPU_ID ]; then
+        echo "GPU_ID为空"
+    else
+        echo "准备修改GPU_ID,请耐心等候..."
+        sed -i "s/GPU_ID=.*/GPU_ID=${GPU_ID}/g" Dockerfile
+        echo "成功修改GPU_ID"
+    fi
+
+    if [ -z $HOST_IP ]; then
+        echo "HOST_IP为空"
+    else
+        echo "准备修改HOST_IP,请耐心等候..."
+        sed -i "s/HOST_IP=.*/HOST_IP=${HOST_IP}/g" Dockerfile
+        echo "成功修改HOST_IP"
+    fi
+
+    if [ -z $WORKERS ]; then
+        echo "WORKERS为空"
+    else
+        echo "准备修改WORKERS,请耐心等候..."
+        sed -i "s/workers=.*/workers=${WORKERS}/g" Dockerfile
+        echo "成功修改WORKERS"
+    fi
+
+    if [ -z $MINIO_HOST ]; then
+        echo "MINIO_HOST为空"
+    else
+        echo "准备修改MINIO_HOST,请耐心等候..."
+        sed -i "s/MINIO_HOST=.*/MINIO_HOST=${MINIO_HOST}/g" Dockerfile
+        echo "成功修改MINIO_HOST"
+    fi
+
+    if [ -z $MINIO_PORT ]; then
+        echo "MINIO_PORT为空"
+    else
+        echo "准备修改MINIO_PORT,请耐心等候..."
+        sed -i "s/MINIO_PORT=.*/MINIO_PORT=${MINIO_PORT}/g" Dockerfile
+        echo "成功修改MINIO_PORT"
+    fi
+
+    if [ -z $MINIO_BUCKET ]; then
+        echo "MINIO_BUCKET为空"
+    else
+        echo "准备修改MINIO_BUCKET,请耐心等候..."
+        sed -i "s/MINIO_BUCKET=.*/MINIO_BUCKET=${MINIO_BUCKET}/g" Dockerfile
+        echo "成功修改MINIO_BUCKET"
+    fi
+
+    if [ -z $MINIO_ACCESS_KEY ]; then
+        echo "MINIO_ACCESS_KEY为空"
+    else
+        echo "准备修改MINIO_ACCESS_KEY,请耐心等候..."
+        sed -i "s/MINIO_ACCESS_KEY=.*/MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}/g" Dockerfile
+        echo "成功修改MINIO_ACCESS_KEY"
+    fi
+
+    if [ -z $MINIO_SECRET_KEY ]; then
+        echo "MINIO_SECRET_KEY为空"
+    else
+        echo "准备修改MINIO_SECRET_KEY,请耐心等候..."
+        sed -i "s/MINIO_SECRET_KEY=.*/MINIO_SECRET_KEY=${MINIO_SECRET_KEY}/g" Dockerfile
+        echo "成功修改MINIO_SECRET_KEY"
+    fi
+
+    if [ -z $KAFKA_HOST ]; then
+        echo "KAFKA_HOST为空"
+    else
+        echo "准备修改KAFKA_HOST,请耐心等候..."
+        sed -i "s/KAFKA_HOST=.*/KAFKA_HOST=${KAFKA_HOST}/g" Dockerfile
+        echo "成功修改KAFKA_HOST"
+    fi
+
+    if [ -z $KAFKA_PORT ]; then
+        echo "KAFKA_PORT为空"
+    else
+        echo "准备修改KAFKA_PORT,请耐心等候..."
+        sed -i "s/KAFKA_PORT=.*/KAFKA_PORT=${KAFKA_PORT}/g" Dockerfile
+        echo "成功修改KAFKA_PORT"
+    fi
+
+    if [ -z $KAFKA_TOPIC ]; then
+        echo "KAFKA_TOPIC为空"
+    else
+        echo "准备修改KAFKA_TOPIC,请耐心等候..."
+        sed -i "s/KAFKA_TOPIC=.*/KAFKA_TOPIC=${KAFKA_TOPIC}/g" Dockerfile
+        echo "成功修改KAFKA_TOPIC"
+    fi
+
+    if [ -z "$DOCKER_RUN_ADDI_PARAMS" ]; then
+        echo "DOCKER_RUN_ADDI_PARAMS为空"
+    else
+        docker_run_param=$DOCKER_RUN_ADDI_PARAMS
+    fi
+
+    if [ -z $PROVINCE_CODE ]; then
+        echo "PROVINCE_CODE为空"
+    else
+        echo "准备修改PROVINCE_CODE,请耐心等候..."
+        sed -i "s/PROVINCE_CODE=.*/PROVINCE_CODE=${PROVINCE_CODE}/g" Dockerfile
+        echo "成功修改PROVINCE_CODE"
+    fi
+
+    if [ -z $BUREAU_CODE ]; then
+        echo "BUREAU_CODE为空"
+    else
+        echo "准备修改BUREAU_CODE,请耐心等候..."
+        sed -i "s/BUREAU_CODE=.*/BUREAU_CODE=${BUREAU_CODE}/g" Dockerfile
+        echo "成功修改BUREAU_CODE"
+    fi
+
+    if [ -z $REGION_CODE ]; then
+        echo "REGION_CODE为空"
+    else
+        echo "准备修改REGION_CODE,请耐心等候..."
+        sed -i "s/REGION_CODE=.*/REGION_CODE=${REGION_CODE}/g" Dockerfile
+        echo "成功修改REGION_CODE"
+    fi
+
+else
+    echo "配置文件install.conf不存在,使用默认配置"
+fi
+
+echo "额外参数: $docker_run_param"
+
+# 获取Dockerfile中GPU_ID值
+gpu_id=$(grep -oP "(?<=ENV GPU_ID=).*" Dockerfile | tr -d '\n\r')
+echo "GPU_ID环境变量的值: $gpu_id"
+
+# AI芯片docker run参数(昆仑芯 XPU)
+device_param="--privileged --device=/dev/xpuctrl"
+
+echo "device_param参数: $device_param"
+
+# 通过额外启动参数 禁用特权参数
+if echo "$docker_run_param" | grep -q "privileged=false"; then
+    echo "privileged 已设置: false(关闭--privileged)"
+    echo "device_param 原来 $device_param"
+    device_param=$(echo "$device_param" | awk '{gsub("--gpus device=all", ""); print}')
+    echo "device_param 改为 $device_param"
+else
+    echo "privileged 未设置false.使用默认设置: enable(开启--privileged=true)"
+fi
+
+# 通过额外启动参数 禁用原端口映射
+if echo "$docker_run_param" | grep -q "NWAI_USE_PORT_PORT=false"; then
+    echo "NWAI_USE_PORT_PORT 已设置:false.原端口映射: $port_param 被禁用"
+    port_param=""
+else
+    echo "NWAI_USE_PORT_PORT 未设置.使用默认设置: enable(开启$port_param)"
+fi
+
+# 读取命令参数(install/stop/restart/delete)
+command=$1
+
+# 根据命令执行相应操作
+case $command in
+
+    "-i"|"install"|"--install")
+        if docker ps -a | grep -q $algorithm_name; then
+            old_container=$(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "找到旧版本的容器: $old_container"
+            docker stop $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功停止旧版本的容器: $old_container"
+            echo "开始删除旧版本的容器: $old_container"
+            docker rm $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功删除旧版本的容器: $old_container"
+        else
+            echo "找不到旧版本的容器: $algorithm_name [跳过]"
+        fi
+
+        if docker images -a | grep -q $algorithm_name; then
+            old_image=$(docker images -a | grep $algorithm_name | awk '{print $1 ":" $2}')
+            echo "找到旧版本的镜像: $old_image"
+            docker rmi $(docker images -a | grep $algorithm_name | awk '{print $1 ":" $2}')
+            echo "成功删除旧版本的镜像: $old_image"
+        else
+            echo "找不到旧版本的镜像: $algorithm_name [跳过]"
+        fi
+
+        echo "开始构建镜像: $image_name"
+        docker_build_cmd="docker build -t $image_name ."
+        $docker_build_cmd
+        if [ $? -eq 0 ]; then
+            echo "构建镜像[正常]: $image_name"
+        else
+            echo "构建镜像[失败]: 状态码: $?"
+            exit -1
+        fi
+
+        echo "开始创建容器: $container_name"
+
+        docker run -d \
+        $port_param \
+        --name $container_name \
+        $device_param \
+        $docker_run_param \
+        --restart=always \
+        $image_name
+
+        if [ $? -eq 0 ]; then
+            echo "创建容器[正常]: $container_name"
+        else
+            echo "创建容器[失败]: 状态码:$?"
+        fi
+
+        echo "容器创建命令:
+        docker run -d \
+        $port_param \
+        --name $container_name \
+        $device_param \
+        $docker_run_param \
+        --restart=always \
+        $image_name"
+
+        ;;
+
+    "-r"|"restart"|"--restart")
+        if docker ps -a | grep -q $algorithm_name; then
+            echo "开始重启容器: $(docker ps -a | grep $algorithm_name | awk '{print $1}')"
+            docker restart $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功重启容器: $(docker ps -a | grep $algorithm_name | awk '{print $1}')"
+        else
+            echo "找不到容器: $(docker ps -a | grep $algorithm_name | awk '{print $1}')"
+        fi
+        ;;
+
+    "-stop"|"stop"|"--stop")
+        if docker ps -a | grep -q $algorithm_name; then
+            echo "开始停止容器: $(docker ps -a | grep $algorithm_name | awk '{print $1}')"
+            docker stop $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功停止容器: $(docker ps -a | grep $algorithm_name | awk '{print $1}')"
+        else
+            echo "找不到容器: $(docker ps -a | grep $algorithm_name | awk '{print $1}')"
+        fi
+        ;;
+
+    "-d"|"delete"|"--delete")
+        if docker ps -a | grep -q $algorithm_name; then
+            old_container=$(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "找到旧版本的容器: $old_container"
+            docker stop $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功停止旧版本的容器: $old_container"
+            echo "开始删除旧版本的容器: $old_container"
+            docker rm $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功删除旧版本的容器: $old_container"
+        else
+            echo "找不到旧版本的容器: $algorithm_name [跳过]"
+        fi
+
+        if docker images -a | grep -q $algorithm_name; then
+            old_image=$(docker images -a | grep $algorithm_name | awk '{print $1 ":" $2}')
+            echo "找到旧版本的镜像: $old_image"
+            docker rmi $(docker images -a | grep $algorithm_name | awk '{print $1 ":" $2}')
+            echo "成功删除旧版本的镜像: $old_image"
+        else
+            echo "找不到旧版本的镜像: $algorithm_name [跳过]"
+        fi
+        ;;
+
+    "-h"|"help"|"--help")
+        echo "-i install 仅构建镜像创建容器 , -d delete 删除已有的镜像和容器 , -r restart 重启容器 , \
+        默认不传参数 删除已有的容器镜像重新创建新的镜像和容器"
+        ;;
+
+    *)
+        if docker ps -a | grep -q $algorithm_name; then
+            old_container=$(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "找到旧版本的容器: $old_container"
+            docker stop $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功停止旧版本的容器: $old_container"
+            echo "开始删除旧版本的容器: $old_container"
+            docker rm $(docker ps -a | grep $algorithm_name | awk '{print $1}')
+            echo "成功删除旧版本的容器: $old_container"
+        else
+            echo "找不到旧版本的容器: $algorithm_name [跳过]"
+        fi
+
+        if docker images -a | grep -q $algorithm_name; then
+            old_image=$(docker images -a | grep $algorithm_name | awk '{print $1 ":" $2}')
+            echo "找到旧版本的镜像: $old_image"
+            docker rmi $(docker images -a | grep $algorithm_name | awk '{print $1 ":" $2}')
+            echo "成功删除旧版本的镜像: $old_image"
+        else
+            echo "找不到旧版本的镜像: $algorithm_name [跳过]"
+        fi
+
+        echo "开始构建镜像: $image_name"
+        docker_build_cmd="docker build -t $image_name ."
+        $docker_build_cmd
+        if [ $? -eq 0 ]; then
+            echo "构建镜像[正常]: $image_name"
+        else
+            echo "构建镜像[失败]: 状态码: $?"
+            exit -1
+        fi
+
+        echo "开始创建容器: $container_name"
+
+        docker run -d \
+        $port_param \
+        --name $container_name \
+        $device_param \
+        $docker_run_param \
+        --restart=always \
+        $image_name
+
+        if [ $? -eq 0 ]; then
+            echo "创建容器[正常]: $container_name"
+        else
+            echo "创建容器[失败]: 状态码: $?"
+        fi
+
+        echo "容器创建命令:
+        docker run -d \
+        $port_param \
+        --name $container_name \
+        $device_param \
+        $docker_run_param \
+        --restart=always \
+        $image_name"
+
+        ;;
 esac
-
-if [ "$action" = "help" ]; then
-    help_info
-    exit 0
-fi
-
-echo "==> 镜像: ${image_full}  容器: ${container_name}  端口: ${web_port}"
-
-# 删除旧容器(若存在)
-if docker ps -a --format '{% raw %}{{.Names}}{% endraw %}' | grep -q "^${container_name}$"; then
-    echo "==> 删除旧容器 ${container_name}"
-    docker rm -f ${container_name} > /dev/null 2>&1
-fi
-
-# 删除旧镜像(若存在)
-old_image_id=$(docker images --format '{% raw %}{{.Repository}}:{{.Tag}} {{.ID}}{% endraw %}' | grep "^${image_full} " | awk '{print $2}')
-if [ -n "$old_image_id" ]; then
-    echo "==> 删除旧镜像 ${image_full}"
-    docker rmi ${image_full} > /dev/null 2>&1
-fi
-
-case "$action" in
-stop)
-    echo "==> 已停止并删除容器 ${container_name}"
-    exit 0
-    ;;
-delete)
-    echo "==> 已删除容器与镜像 ${image_full}"
-    exit 0
-    ;;
-restart)
-    echo "==> 容器已清理,请重新执行 sh build.sh install 构建并启动"
-    exit 0
-    ;;
-esac
-
-# 构建镜像
-echo "==> 开始构建镜像: ${image_full}"
-docker build -t ${image_full} .
-if [ $? -ne 0 ]; then
-    echo "!! 镜像构建失败,请检查上方错误信息"
-    exit 1
-fi
-
-# 启动容器
-echo "==> 启动容器: ${container_name} (端口 ${web_port})"
-docker run -d \
-    -p ${web_port}:${web_port} \
-    --name ${container_name} \
-    ${devices_params} \
-    --restart=always \
-    ${image_full}
-
-if [ $? -ne 0 ]; then
-    echo "!! 容器启动失败, 请检查上方 docker run 报错信息"
-    exit 1
-fi
-
-echo "==> 部署完成. 健康检查: curl http://localhost:${web_port}/health"
-exit 0

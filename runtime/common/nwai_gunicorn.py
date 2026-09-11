@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """gunicorn 启动器(公共 Runtime)。
 
-启动方式与客户现场部署脚本一致: ``python runtime_gunicorn.py``。
+启动方式与客户现场部署脚本一致: ``python nwai_gunicorn.py``。
 单机多卡场景下通过 ``on_starting`` / ``pre_fork`` / ``child_exit`` 钩子把
 XPU 卡分配给各 worker 进程。
 """
@@ -38,10 +38,10 @@ def build_application(app_uri, options):
 
 
 def main():
-    import runtime_settings
+    import nwai_settings
 
-    options = runtime_settings.get_gunicorn_options()
-    app_uri = options.pop("app_uri", "runtime_server:app")
+    options = nwai_settings.get_gunicorn_options()
+    app_uri = options.pop("app_uri", "nwai_webserver:app")
     application = build_application(app_uri, options)
     application.run()
 

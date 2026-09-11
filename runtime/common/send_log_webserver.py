@@ -13,11 +13,11 @@ import threading
 
 from flask import Flask, request
 
-import runtime_logging
-from runtime_tools import ExceptionMessage, GetDateTime, WriteLog
+import nwai_logging
+from nwai_tools import ExceptionMessage, GetDateTime, WriteLog
 
 app = Flask(__name__)
-SETTINGS = runtime_logging.load_settings()
+SETTINGS = nwai_logging.load_settings()
 
 LOG_DIR = os.environ.get("NWAI_LOG_DIR", "/tmp/nwai_log")
 PROCESS_LOG = os.path.join(LOG_DIR, "send_log_webserver.log")
@@ -123,7 +123,7 @@ def receive_log():
         result = upload_file(payload.get("result_image"))
         payload["original_image"] = original
         payload["result_image"] = result
-        if not payload.get("data") and not runtime_logging.upload_flag("g_upload_data_empty_minio", False):
+        if not payload.get("data") and not nwai_logging.upload_flag("g_upload_data_empty_minio", False):
             # 无识别结果且未开启空结果上传: 只转发日志, 不保留文件
             payload["original_image"] = ""
             payload["result_image"] = ""

@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
-"""``manifest.json`` 规范(建设目标 §6)。
+"""交付包元信息模型。
 
-manifest.json 是交付包的**唯一事实来源**: 包名、镜像名、容器名、端口、文件清单
-与校验和全部由它派生, README 与 Dockerfile 也由同一份 metadata 渲染。
+交付包采用"算法同名目录平铺"布局(对齐客户标准包), 包名、镜像名、容器名、端口
+等派生字段由 :class:`PackageManifest` 统一持有, 供 Dockerfile / build.sh /
+readme.txt 模板渲染使用。
 """
 import hashlib
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from xpu_converter.version import CONVERTER_VERSION, RUNTIME_API_VERSION
 
-MANIFEST_FILENAME = "manifest.json"
 ARTIFACT_MANIFEST_FILENAME = "artifact.json"
 
 # 产物文件名约定
@@ -21,7 +20,6 @@ MODEL_YAML_FILENAME = "model.yaml"
 METADATA_FILENAME = "metadata.json"
 CONFIDENCE_FILENAME = "confidence.json"
 RUNTIME_YAML_FILENAME = "runtime.yaml"
-RUNTIME_TGZ_FILENAME = "runtime.tgz"
 
 
 def sha256_file(path) -> str:
@@ -33,36 +31,11 @@ def sha256_file(path) -> str:
     return digest.hexdigest()
 
 
-def collect_files(root, exclude: Optional[List[str]] = None) -> List[str]:
-    """收集目录下所有文件(相对路径, POSIX 分隔符)。"""
-    root_path = Path(root)
-    excluded = set(exclude or [])
-    files: List[str] = []
-    for path in sorted(root_path.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root_path).as_posix()
-        if relative in excluded or relative.endswith(".pyc"):
-            continue
-        files.append(relative)
-    return files
-
-
-def build_checksums(root, files: List[str]) -> Dict[str, str]:
-    root_path = Path(root)
-    checksums: Dict[str, str] = {}
-    for relative in files:
-        path = root_path / relative
-        if path.is_file():
-            checksums[relative] = sha256_file(path)
-    return checksums
-
-
 @dataclass
 class PackageManifest:
     """交付包清单。"""
 
-    package_name: str = "model_dockerimg_v1.0"
+    package_name: str = "model-dockerimg_v1.0"
     package_version: str = "v1.0"
     model_name: str = "model"
     model_version: str = "custom"
@@ -78,9 +51,6 @@ class PackageManifest:
     validation: Dict[str, Any] = field(default_factory=dict)
     benchmark: Dict[str, Any] = field(default_factory=dict)
     image: Dict[str, Any] = field(default_factory=dict)
-    runtime_package: Dict[str, Any] = field(default_factory=dict)
-    files: List[str] = field(default_factory=list)
-    checksums: Dict[str, str] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------ 派生字段
@@ -121,57 +91,6 @@ class PackageManifest:
     def zip_name(self) -> str:
         return "{}.zip".format(self.package_name)
 
-    # ------------------------------------------------------------------ 序列化
-    def to_dict(self) -> Dict[str, Any]:
-        payload = {
-            "package_name": self.package_name,
-            "package_version": self.package_version,
-            "model_name": self.model_name,
-            "model_version": self.model_version,
-            "framework": self.framework,
-            "task": self.task,
-            "hardware": self.hardware,
-            "precision": self.precision,
-            "input": dict(self.input),
-            "runtime": dict(self.runtime),
-            "conversion": dict(self.conversion),
-            "source": dict(self.source),
-            "target": dict(self.target),
-            "validation": dict(self.validation),
-            "benchmark": dict(self.benchmark),
-            "image": dict(self.image),
-        }
-        if self.runtime_package:
-            payload["runtime_package"] = dict(self.runtime_package)
-        payload["degraded"] = self.degraded
-        payload["files"] = list(self.files)
-        payload["checksums"] = dict(self.checksums)
-        if self.notes:
-            payload["notes"] = list(self.notes)
-        return payload
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
-
-    def save(self, path) -> str:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # newline="\n": manifest.json 随交付包分发到 Linux, 统一 LF
-        target.write_text(self.to_json(), encoding="utf-8", newline="\n")
-        return str(target)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PackageManifest":
-        data = dict(data or {})
-        known = {f for f in cls.__dataclass_fields__}
-        kwargs = {k: v for k, v in data.items() if k in known}
-        return cls(**kwargs)
-
-    @classmethod
-    def load(cls, path) -> "PackageManifest":
-        with open(path, "r", encoding="utf-8") as fr:
-            return cls.from_dict(json.load(fr) or {})
-
 
 def build_manifest(
     name: str,
@@ -188,11 +107,10 @@ def build_manifest(
     source: Optional[Dict[str, Any]] = None,
     validation: Optional[Dict[str, Any]] = None,
     benchmark: Optional[Dict[str, Any]] = None,
-    runtime_package: Optional[Dict[str, Any]] = None,
     image: Optional[Dict[str, Any]] = None,
     notes: Optional[List[str]] = None,
 ) -> PackageManifest:
-    """构造交付包清单, 字段顺序与建设目标 §6 的示例保持一致。"""
+    """构造交付包元信息(包名遵循客户标准 ``<算法名>-dockerimg_<版本>``)。"""
     conversion = {
         "converter_version": CONVERTER_VERSION,
         "sdk_adapter": getattr(artifact, "sdk_adapter", "unknown"),
@@ -201,7 +119,7 @@ def build_manifest(
         "notes": list(getattr(artifact, "notes", []) or []),
     }
     return PackageManifest(
-        package_name="{}_dockerimg_{}".format(name, version),
+        package_name="{}-dockerimg_{}".format(name, version),
         package_version=version,
         model_name=name,
         model_version=version,
@@ -219,7 +137,6 @@ def build_manifest(
         validation=dict(validation or {}),
         benchmark=dict(benchmark or {}),
         image=dict(image or {"name": name, "tag": version, "tar": ""}),
-        runtime_package=dict(runtime_package or {}),
         notes=list(notes or []),
     )
 
@@ -235,11 +152,11 @@ def build_artifact_manifest(
 ) -> Dict[str, Any]:
     """构造 ``artifact.json``(ChatGPT 修改意见 §29 / §30)。
 
-    与 ``manifest.json``(交付包里有什么) 不同, ``artifact.json`` 只描述**产物
-    自身的来源与编译信息**: 从哪个 checkpoint(含 SHA256)、用什么导出/优化/后端
-    编译出来的, 以及最终产物的文件与 SHA256。三者关系::
+    ``artifact.json`` 只描述**产物自身的来源与编译信息**: 从哪个 checkpoint
+    (含 SHA256)、用什么导出/优化/后端编译出来的, 以及最终产物的文件与 SHA256。
+    关系::
 
-        build.yaml(model.yaml) -> artifact.json -> manifest.json
+        build.yaml(model.yaml) -> artifact.json(随算法目录一并交付)
     """
     files = [Path(item) for item in (model_files or []) if item]
     primary = files[0] if files else None

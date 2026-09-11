@@ -299,7 +299,7 @@ class BuildManifest:
 
     @property
     def package_name(self) -> str:
-        return str(self.package.get("name") or "{}_dockerimg_{}".format(self.name, self.version))
+        return str(self.package.get("name") or "{}-dockerimg_{}".format(self.name, self.version))
 
     def to_model_override(self) -> Dict[str, Any]:
         """转换为 ModelConfig 的覆盖字段。"""

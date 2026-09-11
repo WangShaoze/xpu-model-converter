@@ -496,5 +496,5 @@ class ConversionPipeline:
                 "enabled": self.validation_enabled,
                 "dataset": self.validation_dataset or "",
             },
-            "package": {"docker": True, "name": "{}_dockerimg_{}".format(name, self.version)},
+            "package": {"docker": True, "name": "{}-dockerimg_{}".format(name, self.version)},
         })

@@ -7,7 +7,7 @@ PyTorch 前端: 它沿用 YOLOv10 的 model_type, 但直接把合成 ONNX 图当
 
 1. ``[01] … [10]`` 十个步骤全部 OK;
 2. 产物目录包含 onnx / xpu / package 三部分;
-3. 交付 ZIP 内 manifest.json 与文件清单一致(交付层一致性, 建设目标 §15);
+3. 交付 ZIP 内为"顶层脚本 + 算法同名目录"的客户标准结构(建设目标 §15);
 4. 仅在**显式**打开降级开关(``allow_degraded`` / ``allow_degraded_package``)时,
    SDK 缺失才允许产出降级占位件; 默认严格模式下必须直接失败。
 """
@@ -132,34 +132,34 @@ class PipelineEndToEndTest(unittest.TestCase):
         self.assertIsNotNone(result.capability)
         self.assertTrue(result.capability.ok, result.capability.reasons)
 
-        # 3) 交付包结构与 manifest 一致性
+        # 3) 交付包结构与客户标准包一致: 顶层脚本 + 算法同名目录
         package_dir = Path(result.package_dir)
-        for relative in (
-            "Dockerfile", "build.sh", "install.conf", "readme.txt", "start.sh",
-            "manifest.json", "runtime.tgz",
-            "model/model.onnx", "model/model.yaml", "model/metadata.json",
-            "config/confidence.json", "config/runtime.yaml",
-        ):
+        algorithm_dir = package_dir / "synthetic_yolo"
+        for relative in ("Dockerfile", "build.sh", "readme.txt"):
             self.assertTrue((package_dir / relative).is_file(), "缺少交付文件: " + relative)
+        self.assertTrue((package_dir / "packages").is_dir())
+        for relative in (
+            "start.sh", "runtime.yaml", "confidence.json", "metadata.json",
+            "artifact.json", "model.yaml",
+            "nwai_webserver.py", "nwai_gunicorn.py", "send_log_webserver.py",
+        ):
+            self.assertTrue((algorithm_dir / relative).is_file(), "缺少算法文件: " + relative)
+        # 模型产物文件名由后端适配器决定(stub 为 model.onnx, paddle 为 model.pdmodel+pdiparams)
+        self.assertTrue(result.artifact.artifact_files, "后端未产出任何模型产物")
+        for artifact_file in result.artifact.artifact_files:
+            name = Path(artifact_file).name
+            self.assertTrue((algorithm_dir / name).is_file(), "缺少模型产物: " + name)
+        # 旧结构(manifest.json / runtime.tgz / model/ / config/ / install.conf)已移除
+        for legacy in ("manifest.json", "runtime.tgz", "model", "config", "install.conf", "start.sh"):
+            self.assertFalse((package_dir / legacy).exists(), "不应存在的旧文件: " + legacy)
 
-        manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["package_name"], "synthetic_yolo_dockerimg_v1.0")
-        self.assertEqual(manifest["conversion"]["converter_version"], CONVERTER_VERSION)
-        listed = set(manifest["files"]) | {"manifest.json"}
-        actual = {
-            p.relative_to(package_dir).as_posix()
-            for p in package_dir.rglob("*")
-            if p.is_file() and not p.name.endswith(".pyc")
-        }
-        self.assertEqual(listed, actual)
-        for relative, digest in manifest["checksums"].items():
-            from xpu_converter.exporter.manifest import sha256_file
-
-            self.assertEqual(digest, sha256_file(package_dir / relative))
+        self.assertEqual(package_dir.name, "synthetic_yolo-dockerimg_v1.0")
+        metadata = json.loads((algorithm_dir / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["converter_version"], CONVERTER_VERSION)
 
         # 4) SDK 缺失 -> 降级标记贯穿交付层
         self.assertTrue(result.degraded)
-        self.assertEqual(manifest["conversion"]["sdk_adapter"], "stub")
+        self.assertEqual(metadata["sdk_adapter"], "stub")
         dockerfile = (package_dir / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("MODEL_ARTIFACT_DEGRADED", dockerfile)
 

@@ -1,10 +1,13 @@
 # xpu-model-converter
 
 模型转换平台：把客户给的框架模型（`best.pt`）转成**昆仑芯 XPU 编译产物**，并自动封装为
-可直接交付的 **Docker 部署包**（`<name>_dockerimg_v1.0.zip`）。
+可直接交付的 **Docker 部署包**（`<算法名>-dockerimg_<版本>.zip`）。
 
-交付包结构与 `yolov9t_dockerimg_v1.0.zip` 保持**交付层兼容**，并补齐 `manifest.json`
-作为唯一事实来源，消灭 `manifest ≠ Dockerfile ≠ README ≠ 实际文件` 的不一致问题。
+交付包结构与客户真实交付包（`nwai-aj-falldowndetect-gxdwnngdj-dockerimg_v1.0`、
+`nwai_dwt_szh_gx_nngjfznxj_a-dockerimg_v1.4`）保持**完全一致**：顶层为
+`Dockerfile` / `build.sh` / `readme.txt` / `packages/` 加一个**算法同名目录**（内含 Runtime
+代码、模型产物、`confidence.json`、`runtime.yaml`、`start.sh`），接口说明书 `.docx` 与
+`testimage.jpg` 可选随包分发。
 
 ## 快速开始
 
@@ -35,7 +38,7 @@ xpu-converter convert \
 [10] Docker Package OK
 ```
 
-最终得到 `./output/yolov10_dockerimg_v1.0.zip`。
+最终得到 `./output/yolov10-dockerimg_v1.0.zip`。
 
 ## 命令行
 
@@ -65,7 +68,7 @@ Intermediate Model (.onnx)
 Compiled Model (model.xpu)
         │  Backend  (xpu_converter/backend/kunlun)
         ▼
-Deployment Package (<name>_dockerimg_v1.0.zip)
+Deployment Package (<算法名>-dockerimg_<版本>.zip)
            Exporter  (xpu_converter/exporter)
 ```
 
@@ -84,11 +87,11 @@ xpu_converter/
 ├── registry/       # 模型与后端注册表
 └── pipeline.py     # 10 步端到端流水线
 
-runtime/            # 公共 Runtime(与模型无关, 所有 YOLO 共用一套)
-├── common/         # 配置/日志/minio+kafka 上报/send_log_webserver/DevicePool/gunicorn
+runtime/            # 公共 Runtime(与模型无关, 所有 YOLO 共用一套, 交付包内以 nwai_* 命名)
+├── common/         # nwai_config/nwai_logging/nwai_backend/minio+kafka 上报/send_log_webserver/DevicePool/gunicorn
 └── detection/      # 检测服务: /predict /predict_image /health /setflag
 
-templates/docker/kunlun/   # Dockerfile / build.sh / install.conf / readme.txt / start.sh 模板
+templates/docker/kunlun/   # Dockerfile / build.sh / readme.txt / start.sh 模板
 configs/models/            # 各模型配置(yolov8/9/10/11)
 configs/hardware/          # 硬件后端配置(kunlun)
 examples/                  # Manifest 与一键脚本示例
@@ -97,28 +100,38 @@ tests/                     # 单元测试与端到端测试
 
 ## 交付包结构
 
+结构与客户真实交付包一致：顶层固定 4 项 + 1 个算法同名目录，说明书与测试图为可选资产。
+
 ```
-<name>_dockerimg_v1.0/
-├── Dockerfile            # 全部由 manifest 渲染, 不硬编码模型名/端口
-├── build.sh              # install|stop|restart|delete|help
-├── install.conf          # 现场可覆盖的部署参数
-├── readme.txt            # 与包内实际文件一致(镜像 tar 存在与否自动切换描述)
-├── start.sh              # 容器入口: 校验产物 + 启动 Runtime
-├── manifest.json         # ★ 唯一事实来源: 包名/镜像名/端口/文件清单/校验和
+<算法名>-dockerimg_<版本>/
+├── Dockerfile            # FROM 基础镜像 + ENV 注入 + COPY 算法目录
+├── build.sh              # install|restart|stop|delete|help
+├── readme.txt            # 组件名称 / 手动安装 / 自动部署 / 测试 / 相关信息
 ├── packages/             # 额外依赖 wheel(无依赖时含 README.txt)
-├── runtime.tgz           # ★ 公共 Runtime(与模型无关)
-├── model/
-│   ├── model.xpu         # 编译产物
-│   ├── model.yaml        # 本次转换的 Manifest
-│   └── metadata.json     # 转换/编译元数据
-└── config/
+├── testimage.jpg         # 可选, 来自 --assets-dir
+├── <接口说明书>.docx       # 可选, 来自 --assets-dir
+└── <算法名>/              # ★ 算法同名目录: 代码 + 模型产物 + 配置平铺
+    ├── nwai_*.py         # 公共 Runtime(与模型无关, 所有模型共用)
+    ├── send_log_webserver.py
+    ├── send_log_settings.json
+    ├── runtime.yaml      # Runtime 运行参数(端口/输入输出契约/类别表)
     ├── confidence.json   # 类别表(model_id/export_id/name/confidence/is_export)
-    └── runtime.yaml      # Runtime 运行参数
+    ├── model.xpu         # 编译产物(Paddle 静态图为 .pdmodel + .pdiparams)
+    ├── metadata.json     # 转换/编译元数据 + 来源环境指纹
+    ├── artifact.json     # 产物来源与编译信息
+    ├── model.yaml        # 本次转换的 Manifest(如何产生这个模型)
+    └── start.sh          # 容器入口: 校验产物 + 启动 Runtime
 ```
 
-`packages/` 的依赖轮子来源由 `configs/hardware/kunlun.yaml` 的 `docker.packages_dir`
-指定（留空则写入占位 `README.txt`），Dockerfile 内以
+`Dockerfile` 以 `COPY <算法名>/ /usr/local/<算法名>/` 引入算法目录，
+`WORKDIR /usr/local/<算法名>` 后由 `CMD ["/bin/bash", "start.sh"]` 启动。
+
+`packages/` 的依赖轮子来源由 `configs/deployment/kunlun_docker.yaml` 的
+`docker.packages_dir` 指定（留空则写入占位 `README.txt`），Dockerfile 内以
 `pip install /tmp/packages/*.whl --no-deps` 安装，无需联网。
+
+接口说明书 `.docx` 与 `testimage.jpg` 由 `docker.assets_dir`（或 CLI `--assets-dir`）
+指定的目录提供，导出时复制到包顶层；目录缺失或未命中时跳过并打印告警，不影响打包。
 
 ## 昆仑芯 Backend 的 SDK 解耦约定
 
@@ -133,7 +146,7 @@ tests/                     # 单元测试与端到端测试
 | `paddle` | 复用镜像内 Paddle Inference 的 XPU 能力 |
 | `stub` | SDK 未就绪时的占位产物，标记 `degraded`，**禁止对外交付** |
 
-探测不到 SDK 时会降级为 `stub`，并把 `degraded=true` 贯穿 `manifest.json` / `Dockerfile` /
+探测不到 SDK 时会降级为 `stub`，并把 `degraded=true` 贯穿 `metadata.json` / `Dockerfile` /
 `readme.txt` / `start.sh`，避免占位件被误当成正式交付物。拿到昆仑 SDK 信息后，只需补全
 对应适配器的 `compile` / `open_session`，上层流水线与交付层无需改动。
 

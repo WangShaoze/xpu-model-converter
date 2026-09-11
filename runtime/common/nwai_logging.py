@@ -8,8 +8,8 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-from runtime_tools import (ApplicationJsonMode, GetDateTime, LogDetailFormat,
-                           SEND_LOG_WEBSERVER_URL, SendLogEnabled)
+from nwai_tools import (ApplicationJsonMode, GetDateTime, LogDetailFormat,
+                        SEND_LOG_WEBSERVER_URL, SendLogEnabled)
 
 SETTINGS_FILE = os.path.join(os.path.abspath(os.path.dirname(__file__)), "send_log_settings.json")
 

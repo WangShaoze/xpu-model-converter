@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """检测任务运行时配置与 gunicorn 钩子。
 
-配置优先级: 环境变量(docker run -e) > ``config/runtime.yaml`` > 内置默认值。
+配置优先级: 环境变量(docker run -e) > 算法目录下 ``runtime.yaml`` > 内置默认值。
 """
 import os
 
-import runtime_config
-from runtime_devices import DevicePool
-from runtime_tools import GetDateTime, WriteLog
+import nwai_config
+from nwai_devices import DevicePool
+from nwai_tools import GetDateTime, WriteLog
 
-CONFIG = runtime_config.load_runtime_config()
+CONFIG = nwai_config.load_runtime_config()
 _RUNTIME = CONFIG.get("runtime") or {}
 _POST = CONFIG.get("postprocess") or {}
 _PRE = CONFIG.get("preprocess") or {}
 _INPUT = CONFIG.get("input") or {}
-_ALGORITHM = runtime_config.algorithm_info(CONFIG)
+_ALGORITHM = nwai_config.algorithm_info(CONFIG)
 
 MODEL_NAME = str(CONFIG.get("name") or "model")
 MODEL_VERSION = str(CONFIG.get("version") or "v1.0")
@@ -109,7 +109,7 @@ def get_gunicorn_options():
     """返回 gunicorn 选项(含钩子)。"""
     workers = DEVICE_POOL.worker_count(WORKERS)
     return {
-        "app_uri": "runtime_server:app",
+        "app_uri": "nwai_webserver:app",
         "bind": "0.0.0.0:{}".format(WEB_PORT),
         "workers": workers,
         "worker_class": "sync",

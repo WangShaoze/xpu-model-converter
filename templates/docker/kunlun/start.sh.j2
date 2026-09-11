@@ -1,33 +1,26 @@
-#!/bin/bash
-# =====================================================================
-# {{ package_name }} 容器启动入口
-# (由 xpu-model-converter docker_export 渲染生成, 请勿手工修改)
-# 职责: 校验交付内容 -> 打印部署信息 -> 交给公共 Runtime 启动服务
-# =====================================================================
-set -e
+# !/bin/bash
+# {{ package_name }} 容器启动入口(算法目录内, 由 xpu-model-converter 渲染生成)
+$SOURCE_PARAM
 
-RUNTIME_HOME="${RUNTIME_HOME:-/opt/xpu}"
-export RUNTIME_HOME
-
-echo "==> 组件: {{ package_name }} / 模型: {{ model_name }} ({{ model_version }})"
-echo "==> 任务: {{ task }}  精度: {{ precision }}  后端: {{ hardware }}  Runtime API: {{ api_version }}"
-echo "==> 端口: ${WEB_PORT:-{{ web_port }}}  设备: ${DEVICE:-{{ device }}}  并发: ${workers:-{{ workers }}}"
-
-if [ ! -f "${RUNTIME_HOME}/model/{{ model_file }}" ]; then
-    echo "!! 未找到模型文件 ${RUNTIME_HOME}/model/{{ model_file }}, 请检查交付包完整性"
+# 交付内容自检: 模型与类别配置缺失时直接退出, 避免静默起服务
+if [ ! -f "{{ model_file }}" ]; then
+    echo "!! 未找到模型文件 {{ model_file }}, 请检查交付包完整性"
     exit 1
 fi
-if [ ! -f "${RUNTIME_HOME}/config/confidence.json" ]; then
-    echo "!! 未找到类别配置 ${RUNTIME_HOME}/config/confidence.json, 请检查交付包完整性"
+if [ ! -f "confidence.json" ]; then
+    echo "!! 未找到类别配置 confidence.json, 请检查交付包完整性"
     exit 1
 fi
 {% if degraded %}
-echo "!! 警告: 本次导出未接入昆仑 SDK, model/{{ model_file }} 为占位产物(内容为规范化 ONNX), 仅供联调, 请勿交付客户"
+echo "!! 警告: 本次导出未接入昆仑 SDK, {{ model_file }} 为占位产物(内容为规范化 ONNX), 仅供联调, 请勿交付客户"
 {% endif %}
-if [ ! -e /dev/xpuctrl ] && [ "${DEVICE:-auto}" != "cpu" ]; then
-    echo "!! 未检测到 /dev/xpuctrl: XPU/Paddle 产物在 DEVICE=auto 下将拒绝启动(避免静默降级 CPU)"
-    echo "   如需在无卡环境联调, 请显式设置 DEVICE=cpu"
-fi
 
-cd "${RUNTIME_HOME}"
-exec /bin/bash service.sh
+# 启动容器内日志转发服务(未配置 MINIO/KAFKA 时自动空转, 不影响识别服务)
+nohup python send_log_webserver.py > /dev/null 2>&1 &
+
+# NWAI_FLASK_ONLY 存在时用 Flask 开发服务器调试, 否则用 gunicorn 生产模式
+if [ -n "${NWAI_FLASK_ONLY+x}" ]; then
+    exec python nwai_webserver.py
+else
+    exec python nwai_gunicorn.py
+fi

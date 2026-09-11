@@ -1,37 +1,21 @@
 # 算法镜像 Dockerfile
 # 本文件由 xpu-model-converter docker_export 渲染生成, 请勿手工修改;
-# 需要调整请修改 configs/hardware/*.yaml 或 configs/models/*.yaml 后重新导出。
+# 需要调整请修改 configs/deployment/*.yaml 或 configs/models/*.yaml 后重新导出。
 #
 # 组件名称 : {{ package_name }}
+# 算法目录 : {{ algorithm_dir }}
 # 模型     : {{ model_name }} ({{ model_version }})
 # 任务/精度: {{ task }} / {{ precision }}
 # 框架     : {{ framework }}   后端: {{ hardware }}    Runtime API: {{ api_version }}
 FROM {{ base_image }}
 
 USER root
-
-# ---- 运行配置(客户现场可用 docker run -e 覆盖; DEVICE=auto 时无 XPU 卡自动降级 cpu) ----
-ENV GPU_ID={{ gpu_id }}
+# ---- 运行配置(客户现场可直接改此处的 ENV, 或用 docker run -e 覆盖) ----
+ENV GPU_ID=0
 ENV workers={{ workers }}
-ENV DEVICE={{ device }}
-ENV WEB_PORT={{ web_port }}
 ENV PARENT_IMAGE={{ base_image }}
 ENV HOST_IP={{ host_ip }}
-ENV CONF_THRES={{ conf_thres }}
-ENV IOU_THRES={{ iou_thres }}
-
-# ---- 模型与接口元信息(与 manifest.json 严格一致) ----
-ENV MODEL_NAME={{ model_name }}
-ENV MODEL_VERSION={{ model_version }}
-ENV ALGORITHM_NAME={{ algorithm_name }}
-ENV ALGORITHM_VERSION={{ algorithm_version }}
-ENV RUNTIME_API_VERSION={{ api_version }}
-ENV RUNTIME_HOME=/opt/xpu
-{% if degraded %}
-# ---- 警告: 本次导出为昆仑 SDK 未就绪时的占位产物, 仅供联调, 请勿交付客户 ----
-ENV MODEL_ARTIFACT_DEGRADED=1
-{% endif %}
-# ---- MINIO/KAFKA 日志上报配置(不填或为空则自动关闭上报, 不影响识别服务) ----
+# ---- MINIO/KAFKA 日志上报(不填或为空则自动关闭上报, 不影响识别服务) ----
 ENV MINIO_HOST={{ minio_host }}
 ENV MINIO_PORT={{ minio_port }}
 ENV MINIO_BUCKET={{ minio_bucket }}
@@ -43,28 +27,24 @@ ENV KAFKA_TOPIC={{ kafka_topic }}
 ENV PROVINCE_CODE=
 ENV BUREAU_CODE=
 ENV REGION_CODE=
-
-# ---- 运行时与交付内容(模型不参与镜像构建, 只做文件投放) ----
-COPY runtime.tgz /opt/xpu/runtime.tgz
-COPY model /opt/xpu/model
-COPY config /opt/xpu/config
-COPY manifest.json /opt/xpu/manifest.json
-COPY start.sh /opt/xpu/start.sh
+{% if degraded %}
+# ---- 警告: 本次导出为昆仑 SDK 未就绪时的占位产物, 仅供联调, 请勿交付客户 ----
+ENV MODEL_ARTIFACT_DEGRADED=1
+{% endif %}
+# ---- 算法与模型(算法目录整体投放到 /usr/local/<算法目录>) ----
+COPY {{ algorithm_dir }}/ /usr/local/{{ algorithm_dir }}/
 
 # 若 packages 目录下无 .whl 等轮子文件, 该步骤会自动跳过
 COPY packages/ /tmp/packages/
 
-RUN tar -xzf /opt/xpu/runtime.tgz -C /opt/xpu && \
-    rm -f /opt/xpu/runtime.tgz && \
-    if ls /tmp/packages/*.whl 1> /dev/null 2>&1; then python3 -m pip install /tmp/packages/*.whl --no-deps; else echo "No .whl files found"; fi && \
+RUN if ls /tmp/packages/*.whl 1> /dev/null 2>&1; then python3 -m pip install /tmp/packages/*.whl --no-deps; else echo "No .whl files found"; fi && \
     if ls /tmp/packages/*.tar.gz 1> /dev/null 2>&1; then python3 -m pip install /tmp/packages/*.tar.gz --no-deps; else echo "No .tar.gz files found"; fi && \
-    chmod +x /opt/xpu/start.sh && \
     ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone
 
-WORKDIR /opt/xpu
+WORKDIR /usr/local/{{ algorithm_dir }}
 
-# 服务运行时读取环境变量, 不需要构建期 sed 回写
+# 运行参数由环境变量注入, 不需要构建期 sed 回写
 ENTRYPOINT []
 
 CMD ["/bin/bash", "start.sh"]

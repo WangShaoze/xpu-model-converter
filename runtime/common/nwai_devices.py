@@ -8,7 +8,7 @@ import os
 import threading
 from typing import List, Optional
 
-from runtime_backend import xpu_device_count
+from nwai_backend import xpu_device_count
 
 
 class DevicePool:

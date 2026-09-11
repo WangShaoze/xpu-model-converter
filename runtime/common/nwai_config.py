@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """运行时配置加载。
 
-公共 Runtime 通过固定相对路径读取交付包内配置, 因此**同一套 Runtime 代码**
-可以服务所有模型(建设目标 §5/§10):
+交付包采用"算法同名目录平铺"布局(对齐客户标准包): Runtime 代码、配置与
+模型产物全部位于算法目录下同一级, 因此**同一套 Runtime 代码**可以服务所有
+模型(建设目标 §5/§10):
 
-    <RUNTIME_HOME>/config/runtime.yaml
-    <RUNTIME_HOME>/config/confidence.json
-    <RUNTIME_HOME>/model/<model.file>      # 由 runtime.yaml 指定(默认 model.xpu)
-    <RUNTIME_HOME>/model/metadata.json
+    <ALGORITHM_DIR>/runtime.yaml
+    <ALGORITHM_DIR>/confidence.json
+    <ALGORITHM_DIR>/<model.file>          # 由 runtime.yaml 指定(默认 model.xpu)
+    <ALGORITHM_DIR>/metadata.json
 """
 import json
 import os
@@ -19,9 +20,8 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None
 
-RUNTIME_YAML = "config/runtime.yaml"
-CONFIDENCE_JSON = "config/confidence.json"
-MODEL_DIR = "model"
+RUNTIME_YAML = "runtime.yaml"
+CONFIDENCE_JSON = "confidence.json"
 DEFAULT_MODEL_FILENAME = "model.xpu"
 METADATA_FILENAME = "metadata.json"
 
@@ -52,7 +52,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 def runtime_home() -> Path:
-    """定位 Runtime 根目录(交付包内 ``config/`` 与 ``model/`` 的父目录)。"""
+    """定位算法目录(Runtime 代码、配置与模型产物所在的平铺目录)。"""
     env_home = os.environ.get("RUNTIME_HOME")
     if env_home and Path(env_home).is_dir():
         return Path(env_home).resolve()
@@ -74,7 +74,7 @@ def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_runtime_config(home: str = None) -> Dict[str, Any]:
-    """读取 ``config/runtime.yaml``, 与默认值合并。"""
+    """读取算法目录下 ``runtime.yaml``, 与默认值合并。"""
     root = Path(home) if home else runtime_home()
     path = root / RUNTIME_YAML
     data: Dict[str, Any] = {}
@@ -87,11 +87,11 @@ def load_runtime_config(home: str = None) -> Dict[str, Any]:
 
 
 def model_path(config: Dict[str, Any] = None) -> str:
-    """编译模型路径。"""
+    """编译模型路径(与代码同级)。"""
     config = config or load_runtime_config()
     root = Path(config.get("_home") or runtime_home())
     filename = str((config.get("model") or {}).get("file") or DEFAULT_MODEL_FILENAME)
-    return str(root / MODEL_DIR / filename)
+    return str(root / filename)
 
 
 def model_params_path(config: Dict[str, Any] = None) -> str:
@@ -107,7 +107,7 @@ def model_params_path(config: Dict[str, Any] = None) -> str:
 def metadata_path(config: Dict[str, Any] = None) -> str:
     config = config or load_runtime_config()
     root = Path(config.get("_home") or runtime_home())
-    return str(root / MODEL_DIR / METADATA_FILENAME)
+    return str(root / METADATA_FILENAME)
 
 
 def confidence_path(config: Dict[str, Any] = None) -> str:
@@ -117,7 +117,7 @@ def confidence_path(config: Dict[str, Any] = None) -> str:
 
 
 def load_model_metadata(config: Dict[str, Any] = None) -> Dict[str, Any]:
-    """读取编译产物侧 ``model/metadata.json``, 用于判断后端类型。"""
+    """读取编译产物侧 ``metadata.json``, 用于判断后端类型。"""
     path = Path(metadata_path(config))
     if not path.is_file():
         return {}

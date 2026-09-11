@@ -3,15 +3,15 @@
 
 V1 约定: **模型只输出 Raw Detection, NMS 在 CPU 侧完成**(建设目标 §17)。
 输出布局不再由 shape 猜测, 而是读取 ``runtime.yaml`` 的 ``output`` 契约,
-交由 :mod:`runtime_decoders` 中对应的解码器处理(见 ChatGPT 修改意见 §16/§17)。
+交由 :mod:`nwai_decoders` 中对应的解码器处理(见 ChatGPT 修改意见 §16/§17)。
 """
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-import runtime_settings as settings
-from runtime_backend import get_engine
-from runtime_decoders import DecoderFactory
+import nwai_settings as settings
+from nwai_backend import get_engine
+from nwai_decoders import DecoderFactory
 
 # 检测结果元组: (model_id, left, top, right, bottom, confidence)
 Detection = Tuple[int, int, int, int, int, float]

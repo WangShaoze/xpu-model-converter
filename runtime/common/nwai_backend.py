@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """运行时推理引擎。
 
-按交付包内 ``model/metadata.json`` 记录的 ``sdk_adapter`` / ``artifact_format``
+按交付包算法目录下 ``metadata.json`` 记录的 ``sdk_adapter`` / ``artifact_format``
 选择加载方式:
 
 ======================  ==========================================
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from runtime_config import load_model_metadata, load_runtime_config, model_params_path, model_path
+from nwai_config import load_model_metadata, load_runtime_config, model_params_path, model_path
 
 
 def xpu_device_count() -> int:

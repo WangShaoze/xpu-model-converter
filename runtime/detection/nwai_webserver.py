@@ -20,12 +20,12 @@ import uuid
 
 from flask import Flask, request, send_file
 
-import runtime_logging
-import runtime_settings as settings
-from runtime_detector import detect
-from runtime_tools import (RETURN_CODE_INTERNAL_ERROR, RETURN_CODE_OK, RETURN_CODE_PARAM_ERROR,
-                           ExceptionMessage, GetResultInfo, Jsonify, LogDetailFormat, WriteLog)
-from runtime_utils import NwaiUtils, result_image_path
+import nwai_logging
+import nwai_settings as settings
+from nwai_detector import detect
+from nwai_tools import (RETURN_CODE_INTERNAL_ERROR, RETURN_CODE_OK, RETURN_CODE_PARAM_ERROR,
+                        ExceptionMessage, GetResultInfo, Jsonify, LogDetailFormat, WriteLog)
+from nwai_utils import NwaiUtils, result_image_path
 
 app = Flask(__name__)
 
@@ -162,7 +162,7 @@ def predict():
                                           message=str(data), data=None, **_algorithm_fields()))
 
         original_path, result_path = _persist_images(image, data, task_id)
-        runtime_logging.report(task_id=task_id, algorithm=settings.ALGORITHM, code=RETURN_CODE_OK,
+        nwai_logging.report(task_id=task_id, algorithm=settings.ALGORITHM, code=RETURN_CODE_OK,
                                message="识别正常", data=data, original_image=original_path,
                                result_image=result_path)
         _log(LogDetailFormat(algorithm=settings.ALGORITHM, task_id=task_id,

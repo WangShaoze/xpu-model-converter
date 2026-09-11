@@ -83,16 +83,17 @@ class CliTest(unittest.TestCase):
             package_args.append("--dev-package")
         code, output = run_cli(*package_args)
         self.assertEqual(code, 0, output)
-        zip_path = package_root / "yolov10_dockerimg_v1.0.zip"
+        package_dir = package_root / "yolov10-dockerimg_v1.0"
+        zip_path = package_root / "yolov10-dockerimg_v1.0.zip"
         self.assertTrue(zip_path.is_file())
-        manifest = json.loads(
-            (package_root / "yolov10_dockerimg_v1.0" / "manifest.json").read_text(encoding="utf-8")
+        metadata_out = json.loads(
+            (package_dir / "yolov10" / "metadata.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(manifest["degraded"], metadata["degraded"])
-        self.assertEqual(manifest["precision"], "fp16")
-        # 多文件产物(Paddle .pdmodel + .pdiparams)必须整组进入交付包
+        self.assertEqual(metadata_out["degraded"], metadata["degraded"])
+        self.assertEqual(metadata_out["precision"], "fp16")
+        # 多文件产物(Paddle .pdmodel + .pdiparams)必须整组进入算法目录
         for item in metadata.get("files") or []:
-            self.assertIn("model/" + Path(item).name, manifest["files"])
+            self.assertTrue((package_dir / "yolov10" / Path(item).name).is_file(), item)
 
         # validate: 基准 ONNX vs 产物, 数值应当一致
         code, output = run_cli(
@@ -134,7 +135,7 @@ class CliTest(unittest.TestCase):
             "  enabled: true\n"
             "package:\n"
             "  docker: true\n"
-            "  name: smoke_det_dockerimg_v2.0\n".format(model_type=SyntheticYoloAdapter.model_type),
+            "  name: smoke_det-dockerimg_v2.0\n".format(model_type=SyntheticYoloAdapter.model_type),
             encoding="utf-8",
         )
         (self.tmp / "best.pt").write_bytes(b"synthetic")
@@ -145,13 +146,13 @@ class CliTest(unittest.TestCase):
         self.assertIn("已加载 manifest", output)
 
         # manifest 决定包名/版本/精度/输入形状; source.file 相对 manifest 目录解析
-        zip_path = output_dir / "smoke_det_dockerimg_v2.0.zip"
+        zip_path = output_dir / "smoke_det-dockerimg_v2.0.zip"
         self.assertTrue(zip_path.is_file(), output)
-        package_dir = output_dir / "smoke_det_dockerimg_v2.0"
-        manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["model_name"], "smoke_det")
-        self.assertEqual(manifest["precision"], "fp32")
-        self.assertEqual(manifest["input"]["shape"], [1, 3, 32, 32])
+        package_dir = output_dir / "smoke_det-dockerimg_v2.0"
+        metadata = json.loads((package_dir / "smoke_det" / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["model_name"], "smoke_det")
+        self.assertEqual(metadata["precision"], "fp32")
+        self.assertEqual(metadata["metadata"]["input"]["shape"], [1, 3, 32, 32])
 
     def test_convert_requires_model(self):
         code, output = run_cli("convert")

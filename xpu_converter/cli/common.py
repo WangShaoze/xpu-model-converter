@@ -132,6 +132,12 @@ def artifact_from_model(model_path: str, precision: str = "fp16", target_chip: s
         notes.append("输入为 ONNX 中间模型而非 XPU 编译产物, 已按占位产物处理")
     if path.suffix.lower() == ".onnx":
         artifact_format = "stub"
+    # 多文件产物(Paddle 静态图为 .pdmodel + .pdiparams)必须整组还原, 否则打包会丢参数文件
+    files = [str(item) for item in (metadata.get("files") or []) if item]
+    if not files:
+        sibling = path.with_suffix(".pdiparams")
+        if sibling.is_file():
+            files = [str(path), str(sibling)]
     return BackendArtifact(
         model_path=str(path),
         precision=str(metadata.get("precision") or precision),
@@ -140,6 +146,7 @@ def artifact_from_model(model_path: str, precision: str = "fp16", target_chip: s
         artifact_format=artifact_format or "placeholder",
         metadata=dict(metadata.get("metadata") or {}),
         notes=notes,
+        files=files,
     )
 
 

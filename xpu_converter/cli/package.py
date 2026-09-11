@@ -49,6 +49,7 @@ def cmd_package(args) -> int:
         model_config=model_config,
         hardware_config=config,
         runtime=getattr(args, "runtime", None) or model_config.task,
+        allow_degraded=bool(getattr(args, "dev_package", False)),
     )
     output_dir = getattr(args, "output", None) or "./package"
     zip_path = exporter.export(

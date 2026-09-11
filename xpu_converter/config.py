@@ -99,6 +99,8 @@ class ModelConfig:
     postprocess: Dict[str, Any] = field(
         default_factory=lambda: {"nms": "cpu", "max_det": 300, "conf_thres": 0.25, "iou_thres": 0.45}
     )
+    # 输出契约: 为空时由 ModelOutputContract.detect 从实际 ONNX 图探测
+    output: Dict[str, Any] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -130,6 +132,7 @@ class ModelConfig:
             "end2end": self.end2end,
             "output_layout": self.output_layout,
             "dynamic": self.dynamic,
+            "output": copy.deepcopy(self.output),
             "preprocess": copy.deepcopy(self.preprocess),
             "postprocess": copy.deepcopy(self.postprocess),
         }
@@ -150,6 +153,8 @@ class HardwareConfig:
     precision: str = "fp16"            # fp32 | fp16
     device: str = "auto"               # auto | xpu | cpu
     optimization_level: int = 2
+    # 是否允许在缺少真实后端时生成降级占位产物(默认 False, 仅开发联调时显式打开)
+    allow_degraded: bool = False
     # 交付容器默认参数
     runtime: Dict[str, Any] = field(
         default_factory=lambda: {
@@ -195,6 +200,7 @@ class HardwareConfig:
             "precision": self.precision,
             "device": self.device,
             "optimization_level": self.optimization_level,
+            "allow_degraded": self.allow_degraded,
             "runtime": copy.deepcopy(self.runtime),
             "docker": copy.deepcopy(self.docker),
             "extra": copy.deepcopy(self.extra),
@@ -203,13 +209,20 @@ class HardwareConfig:
 
 @dataclass
 class BuildManifest:
-    """一次转换任务的完整描述 (建设目标 §14)。"""
+    """一次转换任务的完整描述 (建设目标 §14 / ChatGPT 修改意见 §28)。
+
+    既作为 ``convert --manifest`` 的**输入格式**(可含 runtime/package 段), 也是
+    交付包内 ``model.yaml`` 的来源。写入包内的 ``model.yaml`` 由
+    :meth:`to_model_yaml` 裁剪为"如何产生这个模型"的部分(source/input/target/
+    optimization/validation), 与 ``manifest.json``(包内有什么) 职责分离。
+    """
 
     name: str = "model"
     version: str = "v1.0"
     source: Dict[str, Any] = field(default_factory=dict)      # framework/model_type/file
     input: Dict[str, Any] = field(default_factory=dict)       # shape/dtype
     target: Dict[str, Any] = field(default_factory=dict)      # hardware/precision/batch_size
+    optimization: Dict[str, Any] = field(default_factory=dict)  # level/passes
     runtime: Dict[str, Any] = field(default_factory=dict)     # type/port
     validation: Dict[str, Any] = field(default_factory=dict)  # enabled/dataset
     package: Dict[str, Any] = field(default_factory=dict)     # docker/name/version
@@ -236,9 +249,27 @@ class BuildManifest:
             "source": copy.deepcopy(self.source),
             "input": copy.deepcopy(self.input),
             "target": copy.deepcopy(self.target),
+            "optimization": copy.deepcopy(self.optimization),
             "runtime": copy.deepcopy(self.runtime),
             "validation": copy.deepcopy(self.validation),
             "package": copy.deepcopy(self.package),
+        }
+
+    def to_model_yaml(self) -> Dict[str, Any]:
+        """交付包 ``model.yaml`` 的内容: 只描述"如何产生这个模型"(§28)。
+
+        runtime / package 属于 ``manifest.json`` 的职责(包里有什么), 不再重复写入
+        model.yaml, 避免两者都成为"唯一事实来源"。
+        """
+        return {
+            "name": self.name,
+            "version": self.version,
+            "task": self.task,
+            "source": copy.deepcopy(self.source),
+            "input": copy.deepcopy(self.input),
+            "target": copy.deepcopy(self.target),
+            "optimization": copy.deepcopy(self.optimization),
+            "validation": copy.deepcopy(self.validation),
         }
 
     # ---- 便捷访问 ----

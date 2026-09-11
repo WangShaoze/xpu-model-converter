@@ -13,8 +13,8 @@ echo "==> 组件: {{ package_name }} / 模型: {{ model_name }} ({{ model_versio
 echo "==> 任务: {{ task }}  精度: {{ precision }}  后端: {{ hardware }}  Runtime API: {{ api_version }}"
 echo "==> 端口: ${WEB_PORT:-{{ web_port }}}  设备: ${DEVICE:-{{ device }}}  并发: ${workers:-{{ workers }}}"
 
-if [ ! -f "${RUNTIME_HOME}/model/model.xpu" ]; then
-    echo "!! 未找到模型文件 ${RUNTIME_HOME}/model/model.xpu, 请检查交付包完整性"
+if [ ! -f "${RUNTIME_HOME}/model/{{ model_file }}" ]; then
+    echo "!! 未找到模型文件 ${RUNTIME_HOME}/model/{{ model_file }}, 请检查交付包完整性"
     exit 1
 fi
 if [ ! -f "${RUNTIME_HOME}/config/confidence.json" ]; then
@@ -22,10 +22,11 @@ if [ ! -f "${RUNTIME_HOME}/config/confidence.json" ]; then
     exit 1
 fi
 {% if degraded %}
-echo "!! 警告: 本次导出未接入昆仑 SDK, model/model.xpu 为占位产物(内容为规范化 ONNX), 仅供联调, 请勿交付客户"
+echo "!! 警告: 本次导出未接入昆仑 SDK, model/{{ model_file }} 为占位产物(内容为规范化 ONNX), 仅供联调, 请勿交付客户"
 {% endif %}
 if [ ! -e /dev/xpuctrl ] && [ "${DEVICE:-auto}" != "cpu" ]; then
-    echo "==> 未检测到 /dev/xpuctrl, 将自动降级 CPU 推理(可用但较慢)"
+    echo "!! 未检测到 /dev/xpuctrl: XPU/Paddle 产物在 DEVICE=auto 下将拒绝启动(避免静默降级 CPU)"
+    echo "   如需在无卡环境联调, 请显式设置 DEVICE=cpu"
 fi
 
 cd "${RUNTIME_HOME}"

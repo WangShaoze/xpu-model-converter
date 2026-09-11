@@ -80,26 +80,71 @@ class PyTorchAdapter(BaseModelAdapter):
     def load_model(self, model_path: str) -> Any:
         torch = require_torch()
         path = self._require_file(model_path)
-        try:
-            obj = torch.load(path, map_location="cpu", weights_only=False)
-        except TypeError:  # 兼容不支持 weights_only 的旧版本
-            obj = torch.load(path, map_location="cpu")
-        except Exception as err:
-            raise ModelLoadError("torch.load 读取权重失败: {} ({})".format(path, err))
+        obj = self._torch_load(torch, path)
         return self._extract_module(torch, obj, path)
 
+    @staticmethod
+    def _torch_load(torch, path: str) -> Any:
+        try:
+            return torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:  # 兼容不支持 weights_only 的旧版本
+            return torch.load(path, map_location="cpu")
+        except Exception as err:
+            raise ModelLoadError("torch.load 读取权重失败: {} ({})".format(path, err))
+
     def _extract_module(self, torch, obj: Any, path: str) -> Any:
-        if isinstance(obj, torch.nn.Module):
-            return obj
-        if isinstance(obj, dict):
-            for key in ("model", "ema", "net", "network"):
-                candidate = obj.get(key)
-                if isinstance(candidate, torch.nn.Module):
-                    return candidate
+        """从 checkpoint 中取出可导出的 ``nn.Module``(ChatGPT 修改意见 §11)。
+
+        依次尝试: 直接是 Module → 字典里的 model/ema/net/network → 容器内任意
+        Module → 交给 ultralytics 按 checkpoint 重建。仍失败则给出可操作提示。
+        """
+        module = self._find_module(torch, obj)
+        if module is not None:
+            return module
+        module = self._load_via_ultralytics(path)
+        if module is not None:
+            return module
         raise ModelLoadError(
-            "{} 中未找到可导出的 nn.Module。请提供: 1) ultralytics 训练得到的 .pt 权重; "
+            "{} 中未找到可导出的 nn.Module(可能是仅含 state_dict 的权重, 缺少结构定义)。"
+            "请提供: 1) ultralytics 训练得到的 .pt 权重(含 model/ema); "
             "2) 含模型结构的 torch.save(model) 文件; 3) 或先导出 ONNX 再执行 compile/package。".format(path)
         )
+
+    @classmethod
+    def _find_module(cls, torch, obj: Any, depth: int = 0) -> Any:
+        """深度受限地查找 checkpoint 内嵌的 ``nn.Module``。"""
+        if isinstance(obj, torch.nn.Module):
+            return obj
+        if depth >= 3:
+            return None
+        if isinstance(obj, dict):
+            for key in ("model", "ema", "net", "network"):
+                found = cls._find_module(torch, obj.get(key), depth + 1)
+                if found is not None:
+                    return found
+            for value in obj.values():  # 兜底扫描, 兼容自定义键名
+                if isinstance(value, torch.nn.Module):
+                    return value
+        if isinstance(obj, (list, tuple)):
+            for value in obj:
+                found = cls._find_module(torch, value, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    @staticmethod
+    def _load_via_ultralytics(path: str) -> Any:
+        """作为最后手段, 用 ultralytics 依据 checkpoint 内的 yaml 重建模型。"""
+        if not ultralytics_available():
+            return None
+        try:
+            from ultralytics import YOLO
+
+            loaded = YOLO(path)
+            return getattr(loaded, "model", None) or loaded
+        except Exception as err:  # ultralytics 不可用时静默回退到报错路径
+            logger.warning("ultralytics 无法从 %s 重建模型: %s", path, err)
+            return None
 
     @staticmethod
     def _extract_class_names(model: Any) -> List[str]:

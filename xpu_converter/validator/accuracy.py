@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
-"""精度校验。
+"""精度校验(三层, ChatGPT 修改意见 §19/§20)。
 
-V1 约定做 **PyTorch / ONNX / XPU 三路校验**(建设目标 §17):
+按 Validation Level 分成三层, 并分别给出结论:
 
-    reference ─┬─► onnx  ──► compare
-               ├─► xpu   ──► compare
-               └─► (可选) torch
+    Level 1 Graph       : 原 ONNX        vs 优化 ONNX
+    Level 2 Backend     : 优化 ONNX(CPU) vs 目标后端(XPU)
+    Level 3 Application : 检测指标(IoU / mAP), 需带标注数据集时才有意义
 
-三者共用同一批输入, 逐张量比对输出; 任意一路不通过都会让整次转换失败, 避免
-"模型能编译但结果不对"的静默交付。
+三层各自独立记录, 不再把"数值等价"与"端到端精度"混为一谈; 缺少应用级数据时
+显式标注 ``available=false``, 绝不伪造 mAP。
 """
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -28,34 +28,55 @@ from xpu_converter.validator.tensor_compare import (
     summarize,
 )
 
+# 应用级校验回调: (reference, target, samples) -> dict, 由调用方注入检测评测逻辑
+ApplicationEvaluator = Callable[..., Dict[str, Any]]
+
 
 @dataclass
 class AccuracyReport:
-    """精度校验报告。"""
+    """三层精度校验报告。"""
 
     passed: bool = True
-    pairs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    items: List[TensorCompareResult] = field(default_factory=list)
+    graph: Dict[str, Any] = field(default_factory=dict)
+    backend: Dict[str, Any] = field(default_factory=dict)
+    application: Dict[str, Any] = field(default_factory=dict)
     sample_count: int = 0
     synthetic_inputs: bool = False
+    items: List[TensorCompareResult] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+
+    @property
+    def pairs(self) -> Dict[str, Dict[str, Any]]:
+        """向后兼容: 仅返回已执行的数值层(graph / backend)。"""
+        return {name: detail for name, detail in (("graph", self.graph), ("backend", self.backend)) if detail}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "passed": self.passed,
             "sample_count": self.sample_count,
             "synthetic_inputs": self.synthetic_inputs,
-            "pairs": self.pairs,
+            "graph": dict(self.graph),
+            "backend": dict(self.backend),
+            "application": dict(self.application),
             "overall": summarize(self.items) if self.items else {},
             "notes": list(self.notes),
         }
 
     def summary(self) -> str:
-        if not self.pairs:
+        parts: List[str] = []
+        for name, detail in (("graph", self.graph), ("backend", self.backend)):
+            if not detail:
+                continue
+            parts.append("{}:{}".format(
+                name, "SKIP" if detail.get("skipped") else ("OK" if detail.get("ok") else "FAIL")
+            ))
+        if self.application:
+            parts.append("app:{}".format(
+                "N/A" if not self.application.get("available") else
+                ("OK" if self.application.get("passed", True) else "FAIL")
+            ))
+        if not parts:
             return "跳过(无校验样本)"
-        parts = []
-        for name, detail in self.pairs.items():
-            parts.append("{}:{}".format(name, "OK" if detail.get("ok") else "FAIL"))
         return "{} samples, {}".format(self.sample_count, " ".join(parts))
 
     def save(self, path: str) -> str:
@@ -95,10 +116,13 @@ class AccuracyValidator:
             return {"ok": True, "skipped": True, "reason": "无校验样本"}, []
 
         ref_items: List[TensorCompareResult] = []
+        ref_names = list(input_names or reference.input_names)
+        target_names = list(target.input_names)
         for sample in samples:
-            feeds = self._adapt_inputs(sample, input_names or reference.input_names)
-            reference_outputs = reference.run(feeds)
-            target_outputs = target.run(feeds)
+            ref_feeds = self._adapt_inputs(sample, ref_names)
+            target_feeds = self._rebind_inputs(ref_feeds, ref_names, target_names)
+            reference_outputs = reference.run(ref_feeds)
+            target_outputs = target.run(target_feeds)
             ref_items.extend(
                 compare_outputs(
                     reference_outputs,
@@ -111,6 +135,8 @@ class AccuracyValidator:
             )
         detail = summarize(ref_items)
         detail["pair"] = pair_name
+        detail["reference"] = _session_name(reference)
+        detail["target"] = _session_name(target)
         return detail, ref_items
 
     def validate(
@@ -118,38 +144,78 @@ class AccuracyValidator:
         reference: BaseRuntimeSession,
         target: BaseRuntimeSession,
         samples: Sequence[Dict[str, Any]],
-        onnx_session: Optional[BaseRuntimeSession] = None,
+        graph_reference: Optional[BaseRuntimeSession] = None,
         synthetic: bool = False,
         notes: Optional[List[str]] = None,
+        application_evaluator: Optional[ApplicationEvaluator] = None,
+        num_classes: Optional[int] = None,
     ) -> AccuracyReport:
-        """执行一至三路精度校验。
+        """执行三层精度校验(ChatGPT 修改意见 §19)。
 
-        ``reference`` 为基准(通常来自 ONNX), ``target`` 为待验证后端(通常为 XPU);
-        ``onnx_session`` 不为空时额外做 reference-vs-onnx 的自检。
+        - Level 1 Graph: ``graph_reference``(原 ONNX) vs ``reference``(优化后 ONNX);
+        - Level 2 Backend: ``reference``(优化 ONNX, CPU) vs ``target``(待验证后端);
+        - Level 3 Application: 由 ``application_evaluator`` 提供(缺省则标注不可用)。
         """
         report = AccuracyReport(sample_count=len(samples), synthetic_inputs=synthetic)
         report.notes.extend(notes or [])
 
-        if onnx_session is not None:
-            detail, items = self.compare_sessions(reference, onnx_session, samples, "reference-vs-onnx")
-            report.pairs["onnx"] = detail
+        if graph_reference is not None:
+            detail, items = self.compare_sessions(
+                graph_reference, reference, samples, "onnx-vs-optimized"
+            )
+            report.graph = detail
             if not detail.get("skipped"):
                 report.items.extend(items)
 
-        detail, items = self.compare_sessions(reference, target, samples, "reference-vs-target")
-        report.pairs["target"] = detail
+        detail, items = self.compare_sessions(reference, target, samples, "onnx-vs-target")
+        report.backend = detail
         if not detail.get("skipped"):
             report.items.extend(items)
 
-        report.passed = all(bool(detail.get("ok")) for detail in report.pairs.values())
+        if application_evaluator is not None:
+            try:
+                report.application = dict(application_evaluator(
+                    reference=reference, target=target, samples=samples, num_classes=num_classes,
+                ) or {})
+            except Exception as err:  # 应用级评测失败不应掩盖数值层结论
+                report.application = {"available": False, "reason": "应用级校验执行失败: {}".format(err)}
+                report.notes.append(report.application["reason"])
+        else:
+            report.application = {
+                "available": False,
+                "reason": "未提供带标注的检测数据集, 跳过应用级(IoU/mAP)校验",
+            }
+
+        numeric = [detail for detail in (report.graph, report.backend)
+                   if detail and not detail.get("skipped")]
+        report.passed = all(bool(detail.get("ok")) for detail in numeric)
         if not report.passed and self.fail_on_mismatch:
-            failures = [name for name, detail in report.pairs.items() if not detail.get("ok")]
+            failures = [name for name, detail in (("graph", report.graph), ("backend", report.backend))
+                        if detail and not detail.get("skipped") and not detail.get("ok")]
             raise ValidationError(
-                "精度校验未通过: {}; 详见 report.pairs".format(", ".join(failures))
+                "精度校验未通过: {}; 详见 report.graph / report.backend".format(", ".join(failures))
             )
         return report
 
     # ------------------------------------------------------------------ 输入
+    @staticmethod
+    def _rebind_inputs(feeds: Dict[str, Any], reference_names: Sequence[str],
+                       target_names: Sequence[str]) -> Dict[str, Any]:
+        """把参考会话的输入按**位置**重绑到目标会话。
+
+        不同后端会重命名张量(x2paddle 会把输入改名为 ``x2paddle_<name>``), 因此跨
+        后端比对只能按位置对齐, 不能按名字匹配。
+        """
+        names = list(target_names)
+        if not names:
+            return dict(feeds)
+        values = [feeds[name] for name in reference_names if name in feeds] or list(feeds.values())
+        if len(values) == len(names):
+            return dict(zip(names, values))
+        if len(values) == 1:
+            return {names[0]: values[0]}
+        return dict(feeds)
+
     @staticmethod
     def _adapt_inputs(sample: Dict[str, Any], input_names: Sequence[str]) -> Dict[str, Any]:
         """对齐输入名: 样本键名与模型输入名不一致时按顺序补位。"""
@@ -166,6 +232,11 @@ class AccuracyValidator:
         raise ValidationError(
             "校验样本与模型输入不匹配: 样本键 {} vs 输入名 {}".format(list(sample.keys()), names)
         )
+
+
+def _session_name(session: BaseRuntimeSession) -> str:
+    """会话标识, 用于报告的 reference/target 字段(如 ``onnxruntime`` / ``kunlun-xpu``)。"""
+    return str(getattr(session, "backend_name", "") or type(session).__name__)
 
 
 def load_dataset_inputs(

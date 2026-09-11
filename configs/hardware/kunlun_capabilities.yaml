@@ -1,0 +1,164 @@
+# 昆仑芯 XPU 算子能力表 (Capability Matrix 的数据来源)。
+#
+# 设计要点(见 ChatGPT 修改意见 §7/§8/§33):
+#   算子支持不能被简化成 Set[str], 而必须带上 dtype / 属性 / opset 约束,
+#   否则 Resize(mode=nearest) 与 Resize(mode=bilinear) 会被混为一谈。
+#
+# 字段:
+#   dtypes      该算子允许的浮点 dtype; 留空表示不做 dtype 限制
+#   attributes  属性白名单, 例如 Resize.mode=[nearest]; 留空表示不限制
+#   min_opset / max_opset  ONNX opset 可用区间 (闭区间)
+#
+# 说明: 当前条目为 V1 基线声明, 拿到客户实测 SDK 后按型号回填/裁剪,
+#       不要在未经实测的情况下对外宣称"已支持"。
+version: 1
+target_chip: auto
+
+# 需先经 xpu_converter.rewrite 改写才能被 XPU 消费的算子
+rewrite:
+  Silu: silu
+  Mish: mish
+  Upsample: resize
+  NonMaxSuppression: nms
+
+operators:
+  # ---- 卷积 / 池化 ----
+  Conv: {dtypes: [float32, float16]}
+  ConvTranspose: {dtypes: [float32, float16]}
+  MaxPool: {dtypes: [float32, float16]}
+  AveragePool: {dtypes: [float32, float16]}
+  GlobalAveragePool: {dtypes: [float32, float16]}
+  GlobalMaxPool: {dtypes: [float32, float16]}
+  LpPool: {}
+  MaxUnpool: {}
+  RoiAlign: {}
+
+  # ---- 归一化 ----
+  BatchNormalization: {dtypes: [float32, float16]}
+  InstanceNormalization: {dtypes: [float32, float16]}
+  GroupNormalization: {dtypes: [float32, float16]}
+  LayerNormalization: {dtypes: [float32, float16]}
+  LRN: {dtypes: [float32, float16]}
+  MeanVarianceNormalization: {dtypes: [float32, float16]}
+
+  # ---- 激活 ----
+  Relu: {dtypes: [float32, float16]}
+  LeakyRelu: {dtypes: [float32, float16]}
+  PRelu: {dtypes: [float32, float16]}
+  Sigmoid: {dtypes: [float32, float16]}
+  Tanh: {dtypes: [float32, float16]}
+  HardSigmoid: {dtypes: [float32, float16]}
+  HardSwish: {dtypes: [float32, float16]}
+  Elu: {dtypes: [float32, float16]}
+  Selu: {dtypes: [float32, float16]}
+  Softplus: {dtypes: [float32, float16]}
+  Softsign: {dtypes: [float32, float16]}
+  Gelu: {dtypes: [float32, float16]}
+  Erf: {dtypes: [float32, float16]}
+  Clip: {dtypes: [float32, float16]}
+  ThresholdedRelu: {dtypes: [float32, float16]}
+  Celu: {dtypes: [float32, float16]}
+
+  # ---- 矩阵 / 全连接 ----
+  Gemm: {dtypes: [float32, float16]}
+  MatMul: {dtypes: [float32, float16]}
+  Einsum: {dtypes: [float32, float16]}
+  Trilu: {}
+
+  # ---- 逐元素数学 ----
+  Add: {}
+  Sub: {}
+  Mul: {}
+  Div: {}
+  Pow: {}
+  Sqrt: {}
+  Exp: {}
+  Log: {}
+  Abs: {}
+  Neg: {}
+  Floor: {}
+  Ceil: {}
+  Round: {}
+  Reciprocal: {}
+  Sign: {}
+  Max: {}
+  Min: {}
+  Sum: {}
+  Mean: {}
+  Mod: {}
+  CumSum: {}
+
+  # ---- 逻辑 / 比较 ----
+  Equal: {}
+  Greater: {}
+  GreaterOrEqual: {}
+  Less: {}
+  LessOrEqual: {}
+  And: {}
+  Or: {}
+  Not: {}
+  Xor: {}
+  IsNaN: {}
+  IsInf: {}
+
+  # ---- 张量变形 ----
+  Reshape: {}
+  Squeeze: {}
+  Unsqueeze: {}
+  Transpose: {}
+  Flatten: {}
+  Expand: {}
+  Tile: {}
+  Pad: {}
+  Concat: {}
+  Split: {}
+  Slice: {}
+  DepthToSpace: {}
+  SpaceToDepth: {}
+  Identity: {}
+  Constant: {}
+  ConstantOfShape: {}
+  Cast: {}
+  CastLike: {}
+  # 插值模式必须显式声明: nearest 与 bilinear 的支持情况完全不同(修改意见 §7)
+  Resize: {attributes: {mode: [nearest, bilinear]}}
+  Upsample: {}
+  Where: {}
+  Range: {}
+  Compress: {}
+  EyeLike: {}
+
+  # ---- 索引 / 聚合 ----
+  Gather: {}
+  GatherElements: {}
+  GatherND: {}
+  ScatterElements: {}
+  ScatterND: {}
+  Shape: {}
+  Size: {}
+  NonZero: {}
+  TopK: {}
+  ArgMax: {}
+  ArgMin: {}
+  OneHot: {}
+  ReduceMax: {}
+  ReduceMin: {}
+  ReduceMean: {}
+  ReduceSum: {}
+  ReduceProd: {}
+  ReduceL1: {}
+  ReduceL2: {}
+  ReduceLogSum: {}
+  ReduceLogSumExp: {}
+  ReduceSumSquare: {}
+  ReduceSqrt: {}
+
+  # ---- 概率 ----
+  Softmax: {dtypes: [float32, float16]}
+  LogSoftmax: {dtypes: [float32, float16]}
+  Dropout: {}
+
+  # ---- 循环网络 ----
+  LSTM: {}
+  GRU: {}
+  RNN: {}

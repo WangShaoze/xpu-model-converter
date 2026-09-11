@@ -8,9 +8,12 @@
     ├── Dockerfile / build.sh / install.conf / readme.txt / start.sh
     ├── packages/
     ├── runtime.tgz
-    ├── model/{model.xpu, model.yaml, metadata.json}
+    ├── model/{<产物文件>, model.yaml, metadata.json}
     ├── config/{confidence.json, runtime.yaml}
     └── manifest.json
+
+``model/`` 下的产物文件由编译产物决定(单文件如 ``model.onnx``, Paddle 静态图为
+``model.pdmodel`` + ``model.pdiparams``), 全部复制并由 manifest.json 记录。
 """
 import json
 import shutil
@@ -19,9 +22,11 @@ from typing import Any, Dict, List, Optional
 
 from xpu_converter.classes import coco_classes
 from xpu_converter.config import BuildManifest, HardwareConfig, ModelConfig, dump_yaml
+from xpu_converter.environment import SOURCE_FINGERPRINT_KEYS
 from xpu_converter.errors import PackageError
 from xpu_converter.exporter.manifest import (
     ARTIFACT_FILENAME,
+    ARTIFACT_MANIFEST_FILENAME,
     CONFIDENCE_FILENAME,
     MANIFEST_FILENAME,
     METADATA_FILENAME,
@@ -29,6 +34,7 @@ from xpu_converter.exporter.manifest import (
     RUNTIME_TGZ_FILENAME,
     RUNTIME_YAML_FILENAME,
     PackageManifest,
+    build_artifact_manifest,
     build_checksums,
     build_manifest,
     collect_files,
@@ -40,6 +46,24 @@ from xpu_converter.version import CONVERTER_VERSION, RUNTIME_API_VERSION
 
 RUNTIME_COMMON_DIR = "common"
 DEFAULT_RUNTIME_TASK = "detection"
+
+
+def artifact_files(model_path: str, artifact: Optional[Any]) -> List[Path]:
+    """产物文件清单(主文件在前)。
+
+    Paddle 静态图为 ``model.pdmodel`` + ``model.pdiparams`` 两个文件, 因此交付包
+    必须把它们**一起**复制; ``artifact.artifact_files`` 为空时回退到单文件。
+    """
+    files = list(getattr(artifact, "artifact_files", None) or []) if artifact is not None else []
+    paths = [Path(item) for item in files if item]
+    if not paths and model_path:
+        paths = [Path(model_path)]
+    return paths
+
+
+def artifact_model_filename(model_files: List[Path]) -> str:
+    """交付包 ``model/`` 内的主产物文件名(runtime.yaml / manifest 引用它)。"""
+    return model_files[0].name if model_files else ARTIFACT_FILENAME
 
 
 class RuntimePackager:
@@ -105,6 +129,7 @@ class DockerExporter:
         runtime: str = DEFAULT_RUNTIME_TASK,
         packages_dir: Optional[str] = None,
         converter_version: str = CONVERTER_VERSION,
+        allow_degraded: bool = False,
     ) -> None:
         self.manifest = manifest or BuildManifest()
         self.model_config = model_config or ModelConfig.from_dict(self.manifest.to_model_override())
@@ -115,6 +140,8 @@ class DockerExporter:
             packages_dir = (self.hardware_config.docker or {}).get("packages_dir") or None
         self.packages_dir = self._resolve_packages_dir(packages_dir)
         self.converter_version = converter_version
+        # 是否允许把 degraded(占位)产物封装成正式交付包。默认禁止, 仅 --dev-package 打开。
+        self.allow_degraded = bool(allow_degraded)
 
     @staticmethod
     def _resolve_packages_dir(value: Optional[str]) -> Optional[str]:
@@ -136,10 +163,24 @@ class DockerExporter:
         accuracy: Optional[Any] = None,
         benchmark: Optional[Any] = None,
         image_tar: Optional[str] = None,
+        optimization_report: Optional[Any] = None,
+        hardware_capability: Optional[Any] = None,
     ) -> str:
         """生成交付包目录与 ZIP, 返回 ZIP 路径。"""
         if not model_path or not Path(model_path).is_file():
             raise PackageError("编译产物不存在, 无法导出交付包: {}".format(model_path))
+        if artifact is not None and getattr(artifact, "degraded", False) and not self.allow_degraded:
+            raise PackageError(
+                "当前为 degraded/占位产物(artifact_format={}), 禁止生成正式 Docker 交付包。"
+                "请在拿到真实昆仑后端后重新编译; 若仅用于链路联调, 请显式使用 --dev-package。".format(
+                    getattr(artifact, "artifact_format", "") or "unknown"
+                )
+            )
+        model_files = artifact_files(model_path, artifact)
+        missing = [str(path) for path in model_files if not path.is_file()]
+        if missing:
+            raise PackageError("编译产物文件缺失, 无法导出交付包: {}".format(", ".join(missing)))
+        model_filename = artifact_model_filename(model_files)
 
         root = Path(output_dir)
         root.mkdir(parents=True, exist_ok=True)
@@ -153,13 +194,14 @@ class DockerExporter:
         runtime_tgz = package_dir / RUNTIME_TGZ_FILENAME
         runtime_packager.build(runtime_tgz)
 
-        self._write_model_dir(package_dir, model_path, artifact, onnx_path)
-        self._write_config_dir(package_dir)
+        self._write_model_dir(package_dir, model_files, artifact, onnx_path,
+                              optimization_report, hardware_capability)
+        self._write_config_dir(package_dir, model_filename)
         self._write_packages_dir(package_dir)
 
         package_manifest = self._build_package_manifest(package_dir, artifact, accuracy, benchmark,
-                                                        runtime_packager, image_tar)
-        context = self._template_context(package_manifest)
+                                                        runtime_packager, image_tar, model_filename)
+        context = self._template_context(package_manifest, model_filename)
         TemplateRenderer(self.hardware_config.name).render_all(package_dir, context)
         self._make_executable(package_dir)
 
@@ -173,11 +215,15 @@ class DockerExporter:
         return zip_path
 
     # ------------------------------------------------------------------ 子步骤
-    def _write_model_dir(self, package_dir: Path, model_path: str,
-                         artifact: Optional[Any], onnx_path: Optional[str]) -> None:
+    def _write_model_dir(self, package_dir: Path, model_files: List[Path],
+                         artifact: Optional[Any], onnx_path: Optional[str],
+                         optimization_report: Optional[Any] = None,
+                         hardware_capability: Optional[Any] = None) -> None:
         model_dir = package_dir / "model"
         model_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(model_path, model_dir / ARTIFACT_FILENAME)
+        # Paddle 静态图由 .pdmodel + .pdiparams 两个文件组成, 必须一起复制
+        for path in model_files:
+            shutil.copyfile(str(path), model_dir / path.name)
 
         metadata: Dict[str, Any] = {
             "model_name": self.manifest.name,
@@ -190,11 +236,17 @@ class DockerExporter:
         }
         if artifact is not None and hasattr(artifact, "to_dict"):
             metadata.update(artifact.to_dict())
+        # 来源环境指纹(ChatGPT 修改意见 §13 / §31): 现场排障需要, 平铺到 metadata.json 顶层
+        source = dict(self.manifest.source or {})
+        for key in SOURCE_FINGERPRINT_KEYS:
+            if source.get(key):
+                metadata[key] = source[key]
         metadata["metadata"] = {
             "input": {"shape": self.model_config.input_shape,
                       "dtype": self.model_config.input_dtype,
                       "layout": self.model_config.input_layout},
             "output_layout": self.model_config.output_layout,
+            "output": dict(self.model_config.output),
             "end2end": bool(self.model_config.end2end),
             "num_classes": int(self.model_config.num_classes),
         }
@@ -203,10 +255,29 @@ class DockerExporter:
         with open(model_dir / METADATA_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(metadata, fw, ensure_ascii=False, indent=2)
 
-        # model.yaml: 本次转换任务的 Manifest YAML(建设目标 §14)
-        dump_yaml(self.manifest.to_dict(), model_dir / MODEL_YAML_FILENAME)
+        # artifact.json: 产物自身的来源与编译信息(ChatGPT 修改意见 §29/§30)
+        artifact_manifest = build_artifact_manifest(
+            artifact=artifact,
+            model_files=model_files,
+            model_config=self.model_config,
+            hardware_config=self.hardware_config,
+            source=dict(self.manifest.source or {}),
+            optimization=self._optimization_spec(optimization_report),
+            hardware=hardware_capability,
+        )
+        with open(model_dir / ARTIFACT_MANIFEST_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
+            json.dump(artifact_manifest, fw, ensure_ascii=False, indent=2)
 
-    def _write_config_dir(self, package_dir: Path) -> None:
+        # model.yaml: 只描述"如何产生这个模型"(§28), 包内容由 manifest.json 负责
+        dump_yaml(self.manifest.to_model_yaml(), model_dir / MODEL_YAML_FILENAME)
+
+    def _optimization_spec(self, optimization_report: Optional[Any]) -> Dict[str, Any]:
+        spec: Dict[str, Any] = {"level": int(self.hardware_config.optimization_level)}
+        if optimization_report is not None and hasattr(optimization_report, "to_dict"):
+            spec.update(optimization_report.to_dict())
+        return spec
+
+    def _write_config_dir(self, package_dir: Path, model_filename: str) -> None:
         config_dir = package_dir / "config"
         config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -225,7 +296,7 @@ class DockerExporter:
         with open(config_dir / CONFIDENCE_FILENAME, "w", encoding="utf-8", newline="\n") as fw:
             json.dump(confidence, fw, ensure_ascii=False, indent=2)
 
-        dump_yaml(self._runtime_yaml(class_names), config_dir / RUNTIME_YAML_FILENAME)
+        dump_yaml(self._runtime_yaml(class_names, model_filename), config_dir / RUNTIME_YAML_FILENAME)
 
     def _write_packages_dir(self, package_dir: Path) -> None:
         packages = package_dir / "packages"
@@ -245,7 +316,7 @@ class DockerExporter:
                 newline="\n",
             )
 
-    def _runtime_yaml(self, class_names: List[str]) -> Dict[str, Any]:
+    def _runtime_yaml(self, class_names: List[str], model_filename: str) -> Dict[str, Any]:
         runtime_conf = dict(self.hardware_config.runtime or {})
         return {
             "name": self.manifest.name,
@@ -260,7 +331,7 @@ class DockerExporter:
                 "component_code": "",
                 "template_version": self.manifest.version,
             },
-            "model": {"file": ARTIFACT_FILENAME},
+            "model": {"file": model_filename},
             "input": {
                 "shape": list(self.model_config.input_shape),
                 "dtype": self.model_config.input_dtype,
@@ -284,7 +355,8 @@ class DockerExporter:
     def _build_package_manifest(self, package_dir: Path, artifact: Optional[Any],
                                 accuracy: Optional[Any], benchmark: Optional[Any],
                                 runtime_packager: RuntimePackager,
-                                image_tar: Optional[str]) -> PackageManifest:
+                                image_tar: Optional[str],
+                                model_filename: str) -> PackageManifest:
         runtime_conf = dict(self.hardware_config.runtime or {})
         validation_spec = self.manifest.validation or {}
         validation: Dict[str, Any] = {
@@ -317,11 +389,12 @@ class DockerExporter:
                 "endpoints": ["/predict", "/predict_image", "/health", "/setflag"],
             },
             artifact=artifact,
-            source={
+            model_file=model_filename,
+            source=dict({
                 "framework": self.manifest.framework,
                 "model_type": self.manifest.model_type,
                 "file": self.manifest.model_file,
-            },
+            }, **{k: self.manifest.source.get(k) for k in SOURCE_FINGERPRINT_KEYS if self.manifest.source.get(k)}),
             validation=validation,
             benchmark=benchmark_payload,
             runtime_package={
@@ -338,7 +411,7 @@ class DockerExporter:
             notes=list(getattr(artifact, "notes", []) or []),
         )
 
-    def _template_context(self, package_manifest: PackageManifest) -> Dict[str, Any]:
+    def _template_context(self, package_manifest: PackageManifest, model_filename: str) -> Dict[str, Any]:
         runtime_conf = dict(self.hardware_config.runtime or {})
         docker_conf = dict(self.hardware_config.docker or {})
         log_conf = dict(docker_conf.get("log") or {})
@@ -347,6 +420,7 @@ class DockerExporter:
             "package_version": package_manifest.package_version,
             "model_name": package_manifest.model_name,
             "model_version": package_manifest.model_version,
+            "model_file": model_filename,
             "framework": package_manifest.framework,
             "task": package_manifest.task,
             "hardware": package_manifest.hardware,
@@ -370,14 +444,15 @@ class DockerExporter:
             "container_name": package_manifest.container_name,
             "image_tar": package_manifest.image_tar,
             "class_count": int(self.model_config.num_classes),
-            "minio_host": log_conf.get("minio_host", "128.128.0.1"),
-            "minio_port": log_conf.get("minio_port", "9000"),
-            "minio_bucket": log_conf.get("minio_bucket", "alg-log"),
-            "minio_access_key": log_conf.get("minio_access_key", "minioadmin"),
-            "minio_secret_key": log_conf.get("minio_secret_key", "minioadmin123"),
-            "kafka_host": log_conf.get("kafka_host", "128.128.0.1"),
-            "kafka_port": log_conf.get("kafka_port", "9092"),
-            "kafka_topic": log_conf.get("kafka_topic", "alg-log"),
+            # 日志上报地址留空: 现场通过 docker run -e 或 install.conf 注入, 不落默认口令
+            "minio_host": log_conf.get("minio_host", ""),
+            "minio_port": log_conf.get("minio_port", ""),
+            "minio_bucket": log_conf.get("minio_bucket", ""),
+            "minio_access_key": log_conf.get("minio_access_key", ""),
+            "minio_secret_key": log_conf.get("minio_secret_key", ""),
+            "kafka_host": log_conf.get("kafka_host", ""),
+            "kafka_port": log_conf.get("kafka_port", ""),
+            "kafka_topic": log_conf.get("kafka_topic", ""),
         }
 
     @staticmethod

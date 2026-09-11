@@ -2,12 +2,8 @@
 """检测推理与后处理(公共 Runtime 的检测实现)。
 
 V1 约定: **模型只输出 Raw Detection, NMS 在 CPU 侧完成**(建设目标 §17)。
-本模块兼容常见 YOLO Raw 输出布局:
-
-- ``(B, N, 6)``            : 端到端输出, 每行 ``[x1, y1, x2, y2, conf, cls]``
-- ``(B, 4+nc, N)``         : YOLOv8/v9/v11 无 objectness, 通道优先
-- ``(B, N, 4+nc)``         : 同上, 行优先
-- ``(B, 5+nc, N)``         : 带 objectness(YOLOv5 风格)
+输出布局不再由 shape 猜测, 而是读取 ``runtime.yaml`` 的 ``output`` 契约,
+交由 :mod:`runtime_decoders` 中对应的解码器处理(见 ChatGPT 修改意见 §16/§17)。
 """
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -15,6 +11,7 @@ import numpy as np
 
 import runtime_settings as settings
 from runtime_backend import get_engine
+from runtime_decoders import DecoderFactory
 
 # 检测结果元组: (model_id, left, top, right, bottom, confidence)
 Detection = Tuple[int, int, int, int, int, float]
@@ -104,7 +101,7 @@ class Detector:
                        original_shape: Tuple[int, int], conf_thres: float,
                        iou_thres: float) -> List[Detection]:
         """Raw 输出 -> 原图坐标检测框(CPU NMS)。"""
-        boxes, scores, class_ids = self._parse_outputs(outputs, conf_thres)
+        boxes, scores, class_ids = self.decoder.decode(outputs, conf_thres)
         if boxes.size == 0:
             return []
 
@@ -133,71 +130,6 @@ class Detector:
                 float(scores[index]),
             ))
         return results
-
-    def _parse_outputs(self, outputs: List[np.ndarray],
-                       conf_thres: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """把不同布局的 Raw 输出统一成 ``(boxes_xyxy, scores, class_ids)``。"""
-        if not outputs:
-            return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), np.zeros((0,), np.float32)
-
-        array = np.asarray(outputs[0]).astype(np.float32)
-        if array.ndim == 3:
-            array = array[0]
-        layout = self.layout.lower()
-
-        # 端到端 / 已含 6 列: [x1, y1, x2, y2, conf, cls]
-        if layout in ("auto", "end2end", "nms") and array.ndim == 2 and array.shape[-1] == 6:
-            return self._from_end2end(array, conf_thres)
-        if layout == "end2end":
-            raise ValueError("输出布局与 model.yaml 声明的 end2end 不一致: {}".format(array.shape))
-
-        if array.ndim != 2:
-            return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), np.zeros((0,), np.float32)
-
-        # 通道优先 (4+nc, N) 或 (5+nc, N) → 转置为 (N, C)
-        if array.shape[0] < array.shape[1] and array.shape[0] in (6, 5 + self.num_classes, 4 + self.num_classes):
-            array = array.T
-        return self._from_columns(array, conf_thres)
-
-    @staticmethod
-    def _from_end2end(array: np.ndarray, conf_thres: float):
-        mask = array[:, 4] >= conf_thres
-        rows = array[mask]
-        boxes = rows[:, :4].copy()
-        scores = rows[:, 4].copy()
-        class_ids = rows[:, 5].copy()
-        return boxes, scores, class_ids
-
-    def _from_columns(self, array: np.ndarray, conf_thres: float):
-        """列布局: 支持 4+nc(无 objectness) 与 5+nc(带 objectness)。"""
-        columns = array.shape[1]
-        has_objectness = columns in (5 + self.num_classes,)
-        if not has_objectness and columns != 4 + self.num_classes and columns < 5:
-            # 未知列数: 尽量按 4 + 类别数 推断
-            class_count = max(1, columns - 4)
-        else:
-            class_count = self.num_classes if (has_objectness or columns == 4 + self.num_classes) else columns - 4
-
-        centers = array[:, :4]
-        if has_objectness:
-            objectness = array[:, 4]
-            class_scores = array[:, 5:5 + class_count]
-        else:
-            objectness = np.ones_like(array[:, 0])
-            class_scores = array[:, 4:4 + class_count]
-
-        if class_scores.size == 0:
-            return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), np.zeros((0,), np.float32)
-
-        class_ids = np.argmax(class_scores, axis=1)
-        scores = objectness * class_scores[np.arange(class_scores.shape[0]), class_ids]
-        mask = scores >= conf_thres
-        if not np.any(mask):
-            return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), np.zeros((0,), np.float32)
-
-        cx, cy, width, height = (centers[mask, 0], centers[mask, 1], centers[mask, 2], centers[mask, 3])
-        boxes = np.stack([cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2], axis=1)
-        return boxes, scores[mask], class_ids[mask].astype(np.float32)
 
     @staticmethod
     def _nms(boxes: np.ndarray, scores: np.ndarray, class_ids: np.ndarray,

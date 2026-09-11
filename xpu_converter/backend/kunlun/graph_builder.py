@@ -15,7 +15,9 @@ from xpu_converter.ir import onnx as onnx_ir
 
 # 交付包内约定的模型文件名(建设目标 §6)
 DEFAULT_MODEL_FILENAME = "model.xpu"
-DEFAULT_ONNX_FILENAME = "model.onnx"
+# 交给编译器的规范化 ONNX 文件名。刻意与最终产物(model.xpu / model.onnx /
+# model.pdmodel)区分, 否则 stub 适配器复制时会与源文件同名(Windows/Linux 均报错)。
+DEFAULT_ONNX_FILENAME = "compile_graph.onnx"
 
 
 @dataclass

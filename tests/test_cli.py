@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests import _models
+from tests import requires_onnx
 from tests.test_pipeline import SyntheticYoloAdapter
 from xpu_converter.cli.main import main
 from xpu_converter.ir import onnx as onnx_ir
@@ -30,6 +31,7 @@ def run_cli(*argv):
     return code, captured.getvalue()
 
 
+@requires_onnx
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="xpu_cli_"))
@@ -62,29 +64,36 @@ class CliTest(unittest.TestCase):
             "--precision", "fp16", "--input-shape", "1,3,32,32", "--output", str(xpu_dir),
         )
         self.assertEqual(code, 0, output)
-        artifact = xpu_dir / "model.xpu"
-        self.assertTrue(artifact.is_file())
         self.assertTrue((xpu_dir / "metadata.json").is_file())
         metadata = json.loads((xpu_dir / "metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(metadata["sdk_adapter"], "stub")
-        self.assertTrue(metadata["degraded"])
+        # 适配器由环境决定: 装有 paddle + x2paddle 时产出真实 Paddle 静态图, 否则退占位件
+        self.assertIn(metadata["sdk_adapter"], ("paddle", "stub"))
+        artifact = Path(metadata["model_path"])
+        self.assertTrue(artifact.is_file(), artifact)
+        self.assertEqual(metadata["degraded"], metadata["artifact_format"] == "stub")
 
         # package 由产物 + 旁路 metadata.json 还原 artifact, 并保持降级标记
         package_root = self.tmp / "package"
-        code, output = run_cli(
+        package_args = [
             "package", "--model", str(artifact), "--model-type", "yolov10",
             "--input-shape", "1,3,32,32", "--output", str(package_root),
-        )
+        ]
+        if metadata["degraded"]:
+            package_args.append("--dev-package")
+        code, output = run_cli(*package_args)
         self.assertEqual(code, 0, output)
         zip_path = package_root / "yolov10_dockerimg_v1.0.zip"
         self.assertTrue(zip_path.is_file())
         manifest = json.loads(
             (package_root / "yolov10_dockerimg_v1.0" / "manifest.json").read_text(encoding="utf-8")
         )
-        self.assertTrue(manifest["degraded"])
+        self.assertEqual(manifest["degraded"], metadata["degraded"])
         self.assertEqual(manifest["precision"], "fp16")
+        # 多文件产物(Paddle .pdmodel + .pdiparams)必须整组进入交付包
+        for item in metadata.get("files") or []:
+            self.assertIn("model/" + Path(item).name, manifest["files"])
 
-        # validate: 基准 ONNX vs 占位产物, 数值应当一致
+        # validate: 基准 ONNX vs 产物, 数值应当一致
         code, output = run_cli(
             "validate", "--source", str(self.onnx_path), "--target", str(artifact),
             "--input-shape", "1,3,32,32", "--max-samples", "2",

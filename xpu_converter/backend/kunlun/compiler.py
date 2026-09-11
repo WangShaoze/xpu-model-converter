@@ -1,26 +1,31 @@
 # -*- coding: utf-8 -*-
-"""昆仑芯编译器(SDK 解耦)。
+"""昆仑芯编译器(以 Paddle Inference 为唯一真实 Python 入口)。
 
-设计约束(建设目标 §17 末尾):
-    在 XPU 型号、SDK/XTCL 版本确定之前, 本模块**不假设任何具体厂商 API**。
-    具体调用被隔离在 :class:`KunlunSdkAdapter` 的各个子类中:
+环境事实(经实测确认):
+
+* 昆仑 XPU SDK 是 C/C++ 库(``libxpurt.so`` / ``libxpuml.so``), **没有 Python API**;
+* Python 侧唯一入口是 ``paddlepaddle-xpu`` 的 Paddle Inference
+  (``Config`` / ``enable_xpu`` / ``set_xpu_device_id``);
+* 因此"编译"= 把 ONNX 转成 Paddle 静态图(``model.pdmodel`` + ``model.pdiparams``),
+  真正的 XPU kernel 由 Paddle 在**加载时**按设备编译。
+
+适配器:
 
     ============  ==================================================
     sdk_adapter   说明
     ============  ==================================================
-    ``auto``      按优先级自动探测可用适配器
-    ``paddle``    复用镜像内 Paddle Inference 的 XPU 能力(加载即编译)
-    ``xpuctl``    调用昆仑 XPU Toolkit / XTCL 编译 ONNX 为 ``model.xpu``
-    ``stub``      SDK 未就绪时的离线占位产物, 标记 degraded, 禁止对外交付
+    ``auto``      按优先级自动探测(优先 paddle)
+    ``paddle``    ONNX --x2paddle--> Paddle 静态图(设备无关, 加载时 enable_xpu)
+    ``xpuctl``    预留: 若存在真实 XPU Toolkit Python 模块(由 sdk_module 指定)
+    ``stub``      无后端时的占位产物, 标记 degraded, 禁止对外交付
     ============  ==================================================
-
-拿到昆仑 SDK 信息后, 只需补全对应适配器里的 ``compile`` / ``open_session``,
-:meth:`KunlunBackend.compile` 这一层无需改动。
 """
 import importlib
 import importlib.util
 import json
+import os
 import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,12 +37,14 @@ from xpu_converter.backend.kunlun.operator_registry import KunlunOperatorRegistr
 from xpu_converter.errors import BackendNotAvailableError, CompileError
 from xpu_converter.version import CONVERTER_VERSION
 
-# 交付包内约定的编译模型文件名(建设目标 §6)
+# 兼容旧引用: 交付包内约定的默认模型文件名
 ARTIFACT_FILENAME = "model.xpu"
 METADATA_FILENAME = "metadata.json"
 
-# 候选 SDK 模块名: 昆仑侧命名可能变化, 因此做多候选探测
-XPU_TOOLKIT_MODULES = ("xpu_toolkit", "xtcl", "xpu_inference")
+# 仅供 ``sdk_adapter=xpuctl`` 使用: 真实 XPU Toolkit Python 模块名由配置
+# (``sdk_module``)或环境变量指定。历史实现硬编码了三个并不存在的模块名, 导致
+# 永远探测失败并静默降级, 这里改为"无配置即不可用"。
+XPU_TOOLKIT_MODULE_ENV = "XPU_TOOLKIT_MODULE"
 
 
 class KunlunSdkAdapter(ABC):
@@ -62,20 +69,18 @@ class KunlunSdkAdapter(ABC):
 
     @abstractmethod
     def compile(self, xpu_graph: XpuGraph, output_path: str, config: KunlunConfig) -> BackendArtifact:
-        """把待编译图落成 ``model.xpu``。"""
+        """把待编译图落成交付产物。"""
 
     @abstractmethod
     def open_session(self, model_path: str, config: KunlunConfig) -> BaseRuntimeSession:
-        """为 ``model.xpu`` 创建推理会话。"""
+        """为产物创建推理会话。"""
 
 
 class StubSdkAdapter(KunlunSdkAdapter):
-    """离线占位适配器。
+    """离线占位适配器(仅供开发联调, 禁止对外交付)。
 
-    昆仑 SDK 未就绪时, 把规范化后的 ONNX 直接作为 ``model.xpu`` 落盘, 使
-    转换 → 校验 → 打包 → Runtime 的**全链路可以先打通并验证**。
-    产物在 :class:`xpu_converter.backend.base.BackendArtifact` 中标记为
-    ``degraded=True``, 交付层模板会同时写入醒目告警, 避免误交付。
+    把规范化后的 ONNX 落盘为 ``<stem>.onnx``(不再伪装成 ``model.xpu``), 并在
+    :class:`BackendArtifact` 中标记 ``degraded``; 默认配置下不会走到这里。
     """
 
     name = "stub"
@@ -89,7 +94,7 @@ class StubSdkAdapter(KunlunSdkAdapter):
         source = xpu_graph.onnx_path
         if not source or not Path(source).is_file():
             raise CompileError("stub 适配器需要待编译图已落盘, 请先构建 XpuGraph 时传入 workdir")
-        target = Path(output_path)
+        target = Path(output_path).with_suffix(".onnx")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, str(target))
         return BackendArtifact(
@@ -99,9 +104,10 @@ class StubSdkAdapter(KunlunSdkAdapter):
             target_chip=config.target_chip,
             artifact_format="stub",
             notes=[
-                "未检测到昆仑 SDK, 已生成占位产物(内容为规范化 ONNX), 仅供链路联调, 不可对外交付",
+                "未检测到真实昆仑后端, 已生成占位产物(内容为规范化 ONNX), 仅供链路联调, 不可对外交付",
             ],
             metadata={"onnx_source": source},
+            files=[str(target)],
         )
 
     def open_session(self, model_path: str, config: KunlunConfig) -> BaseRuntimeSession:
@@ -110,25 +116,101 @@ class StubSdkAdapter(KunlunSdkAdapter):
         return OnnxRuntimeSession(model_path, device=config.device)
 
 
-class XpuToolkitSdkAdapter(KunlunSdkAdapter):
-    """昆仑 XPU Toolkit / XTCL 适配器(ONNX → ``model.xpu``)。
+class PaddleXpuSdkAdapter(KunlunSdkAdapter):
+    """Paddle Inference + XPU 适配器(真实路径)。
 
-    TODO(SDK): 拿到昆仑 SDK 版本后, 在 :meth:`compile` 中落地真实编译参数
-    (芯片型号、输入 layout、量化配置等)。当前实现保留了完整的探测与报错路径,
-    确保调用方代码无需改动。
+    昆仑 XPU 的 kernel 由 Paddle 在**加载时**编译, 因此"编译"产物是一份
+    **设备无关**的 Paddle 静态图: 有卡时 ``enable_xpu()``, 无卡时退 CPU。
+    ONNX -> Paddle 静态图由 X2Paddle 完成。
     """
 
-    name = "xpuctl"
+    name = "paddle"
     priority = 10
     accepts_onnx = True
 
     @classmethod
+    def available(cls) -> bool:
+        if importlib.util.find_spec("paddle") is None:
+            return False
+        if importlib.util.find_spec("x2paddle") is None:
+            return False
+        try:
+            inference = importlib.import_module("paddle.inference")
+        except ImportError:  # pragma: no cover - 依赖镜像内 Paddle 版本
+            return False
+        return hasattr(inference, "Config")
+
+    def compile(self, xpu_graph: XpuGraph, output_path: str, config: KunlunConfig) -> BackendArtifact:
+        if not xpu_graph.onnx_path or not Path(xpu_graph.onnx_path).is_file():
+            raise CompileError("待编译图未落盘, 无法执行 ONNX -> Paddle 转换")
+        if not self.available():
+            raise BackendNotAvailableError(
+                "缺少 Paddle Inference 或 X2Paddle, 无法执行 ONNX -> Paddle 转换"
+            )
+
+        target = Path(output_path)
+        stem = target.stem or "model"
+        workdir = target.parent
+        workdir.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory(prefix="xpu_paddle_") as tmp:
+            sanitized = _sanitize_onnx_for_x2paddle(xpu_graph.onnx_path, Path(tmp))
+            _onnx_to_paddle(sanitized, tmp)
+            prog, params = _locate_paddle_pair(Path(tmp))
+            if prog is None or params is None:
+                raise CompileError("X2Paddle 未产出 Paddle 静态图(.pdmodel/.pdiparams)")
+            prog_dst = workdir / (stem + prog.suffix)
+            params_dst = workdir / (stem + ".pdiparams")
+            shutil.copyfile(str(prog), str(prog_dst))
+            shutil.copyfile(str(params), str(params_dst))
+
+        return BackendArtifact(
+            model_path=str(prog_dst),
+            precision=config.precision,
+            sdk_adapter=self.name,
+            target_chip=config.target_chip,
+            artifact_format="paddle",
+            notes=[
+                "昆仑 XPU kernel 由 Paddle Inference 在加载时编译; 交付产物为设备无关静态图",
+            ],
+            metadata={
+                "onnx_source": xpu_graph.onnx_path,
+                "program_file": prog_dst.name,
+                "params_file": params_dst.name,
+                "input_names": list(xpu_graph.input_names),
+                "output_names": list(xpu_graph.output_names),
+                "x2paddle_version": _module_version("x2paddle"),
+                "paddle_version": _module_version("paddle"),
+            },
+            files=[str(prog_dst), str(params_dst)],
+        )
+
+    def open_session(self, model_path: str, config: KunlunConfig) -> BaseRuntimeSession:
+        from xpu_converter.backend.kunlun.runtime import PaddleXpuRuntimeSession
+
+        return PaddleXpuRuntimeSession(model_path, device=config.device)
+
+
+class XpuToolkitSdkAdapter(KunlunSdkAdapter):
+    """昆仑 XPU Toolkit 适配器(预留)。
+
+    昆仑 SDK 为 C/C++ 库, 无官方 Python API; 本适配器仅在显式配置了真实
+    ``sdk_module``(配置项或环境变量 ``XPU_TOOLKIT_MODULE``)时才可用, 否则
+    视为不可用, 不做任何虚构模块探测。
+    """
+
+    name = "xpuctl"
+    priority = 20
+    accepts_onnx = True
+
+    @classmethod
     def module_name(cls, config: Optional[KunlunConfig] = None) -> Optional[str]:
+        candidate = None
         if config is not None and config.sdk_module:
-            return config.sdk_module if importlib.util.find_spec(config.sdk_module) else None
-        for candidate in XPU_TOOLKIT_MODULES:
-            if importlib.util.find_spec(candidate) is not None:
-                return candidate
+            candidate = config.sdk_module
+        candidate = candidate or os.environ.get(XPU_TOOLKIT_MODULE_ENV) or ""
+        if candidate and importlib.util.find_spec(candidate) is not None:
+            return candidate
         return None
 
     @classmethod
@@ -139,9 +221,8 @@ class XpuToolkitSdkAdapter(KunlunSdkAdapter):
         module_name = self.module_name(config)
         if not module_name:
             raise BackendNotAvailableError(
-                "未找到昆仑 XPU Toolkit 模块(候选: {}), 可用 sdk_adapter=stub 先行联调".format(
-                    ", ".join(XPU_TOOLKIT_MODULES)
-                )
+                "未配置真实昆仑 XPU Toolkit 模块(设置 sdk_module 或环境变量 {}), "
+                "如需真实产物请使用 sdk_adapter=paddle".format(XPU_TOOLKIT_MODULE_ENV)
             )
         if not xpu_graph.onnx_path or not Path(xpu_graph.onnx_path).is_file():
             raise CompileError("待编译图未落盘, 无法调用 XPU Toolkit")
@@ -160,7 +241,7 @@ class XpuToolkitSdkAdapter(KunlunSdkAdapter):
             raise BackendNotAvailableError(
                 "{} 实例上未找到 compile/build/convert 方法, 待按实际 SDK 落地".format(module_name)
             )
-        target = Path(output_path)
+        target = Path(output_path).with_suffix(".xpu")
         target.parent.mkdir(parents=True, exist_ok=True)
         result = compile_method(output=str(target), precision=xpu_graph.precision)
         produced = _resolve_output_path(result, target)
@@ -173,6 +254,7 @@ class XpuToolkitSdkAdapter(KunlunSdkAdapter):
             target_chip=config.target_chip,
             artifact_format="xpu",
             metadata={"sdk_module": module_name, "onnx_source": xpu_graph.onnx_path},
+            files=[str(produced)],
         )
 
     def open_session(self, model_path: str, config: KunlunConfig) -> BaseRuntimeSession:
@@ -180,42 +262,82 @@ class XpuToolkitSdkAdapter(KunlunSdkAdapter):
 
         module_name = self.module_name(config)
         if not module_name:
-            raise BackendNotAvailableError("未找到昆仑 XPU Toolkit 模块, 无法创建推理会话")
+            raise BackendNotAvailableError("未配置昆仑 XPU Toolkit 模块, 无法创建推理会话")
         return XpuToolkitRuntimeSession(model_path, module_name=module_name, device=config.device)
 
 
-class PaddleXpuSdkAdapter(KunlunSdkAdapter):
-    """Paddle Inference + XPU 适配器。
+# ---------------------------------------------------------------------- 工具
+def _module_version(name: str) -> str:
+    try:
+        if importlib.util.find_spec(name) is None:
+            return ""
+        return str(getattr(importlib.import_module(name), "__version__", "") or "")
+    except Exception:
+        return ""
 
-    昆仑 XPU 的 kernel 由上游 Paddle 在**加载时编译**, 因此本适配器只接受
-    Paddle 推理 program(``.pdmodel``/``.pdiparams``), 不消费 ONNX。
-    用于第三阶段 PaddleOCR / PaddleDetection 线路。
+
+def _sanitize_onnx_for_x2paddle(onnx_path: str, workdir: Path) -> str:
+    """修补 X2Paddle 1.6.0 无法处理的 ONNX 写法, 返回可转换的 ONNX 路径。
+
+    已确认的两类问题:
+
+    1. MaxPool 的默认 ``dilations=[1,1]`` 会被当作不支持属性并报错;
+    2. Conv 的 ``kernel_shape`` 在 ONNX 中是**可选**属性(可从权重推导), 但
+       X2Paddle 直接 ``len(kernel_shape)`` 会因 ``None`` 崩溃, 需按权重补齐。
+
+    无任何改动时返回原路径, 避免无谓地复制模型。
     """
+    import onnx
 
-    name = "paddle"
-    priority = 20
-    accepts_onnx = False
+    model = onnx.load(onnx_path)
+    initializers = {tensor.name: tensor for tensor in model.graph.initializer}
+    changed = 0
+    for node in model.graph.node:
+        if node.op_type == "MaxPool" and _has_attribute(node, "dilations"):
+            kept = [attr for attr in node.attribute if attr.name != "dilations"]
+            del node.attribute[:]
+            node.attribute.extend(kept)
+            changed += 1
+        if node.op_type in ("Conv", "ConvTranspose", "MaxPool", "AveragePool") \
+                and not _has_attribute(node, "kernel_shape") and len(node.input) >= 2:
+            weight = initializers.get(node.input[1])
+            kernel = list(weight.dims)[2:] if weight is not None else []
+            if kernel:
+                node.attribute.extend([onnx.helper.make_attribute("kernel_shape", kernel)])
+                changed += 1
+    if changed == 0:
+        return onnx_path
+    sanitized = workdir / (Path(onnx_path).stem + "_x2paddle.onnx")
+    onnx.save(model, str(sanitized))
+    return str(sanitized)
 
-    @classmethod
-    def available(cls) -> bool:
-        if importlib.util.find_spec("paddle") is None:
-            return False
-        try:
-            inference = importlib.import_module("paddle.inference")
-        except ImportError:  # pragma: no cover - 依赖镜像内 Paddle 版本
-            return False
-        return hasattr(inference, "Config")
 
-    def compile(self, xpu_graph: XpuGraph, output_path: str, config: KunlunConfig) -> BackendArtifact:
-        raise BackendNotAvailableError(
-            "paddle 适配器仅支持 Paddle 推理模型, 当前流水线输入为 ONNX; "
-            "如需走 Paddle 线路请使用 frontend=paddle 并在拿到昆仑 SDK 后补全本适配器"
-        )
+def _has_attribute(node, name: str) -> bool:
+    return any(attr.name == name for attr in node.attribute)
 
-    def open_session(self, model_path: str, config: KunlunConfig) -> BaseRuntimeSession:
-        from xpu_converter.backend.kunlun.runtime import PaddleXpuRuntimeSession
 
-        return PaddleXpuRuntimeSession(model_path, device=config.device)
+def _onnx_to_paddle(onnx_path: str, save_dir: str) -> None:
+    try:
+        from x2paddle.convert import onnx2paddle
+    except ImportError as err:
+        raise BackendNotAvailableError("缺少 X2Paddle 依赖: {}".format(err))
+    try:
+        onnx2paddle(onnx_path, save_dir)
+    except Exception as err:
+        raise CompileError("X2Paddle ONNX -> Paddle 转换失败: {}".format(err))
+
+
+def _locate_paddle_pair(root: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    """在 X2Paddle 输出目录中定位 (program, params) 文件对。"""
+    for prog in sorted(root.rglob("*.pdmodel")):
+        params = prog.with_suffix(".pdiparams")
+        if params.is_file():
+            return prog, params
+    for prog in sorted(root.rglob("*.json")):
+        params = prog.with_suffix(".pdiparams")
+        if params.is_file():
+            return prog, params
+    return None, None
 
 
 def _first_attr(obj, names) -> Any:
@@ -247,8 +369,8 @@ def _resolve_output_path(result: Any, default: Path) -> Path:
     return default
 
 
-# 自动探测顺序: 优先能直接消费 ONNX 的 SDK
-ADAPTER_REGISTRY: List[type] = [XpuToolkitSdkAdapter, PaddleXpuSdkAdapter]
+# 自动探测顺序: 优先能产出真实设备无关静态图的 Paddle 路径
+ADAPTER_REGISTRY: List[type] = [PaddleXpuSdkAdapter, XpuToolkitSdkAdapter]
 
 
 class KunlunBackend(BaseBackend):
@@ -276,13 +398,13 @@ class KunlunBackend(BaseBackend):
         }
 
     def sdk_ready(self) -> bool:
-        """是否存在可直接产出真实 XPU 产物的 SDK。"""
+        """是否存在可直接产出真实产物的 SDK。"""
         adapter, degraded = self._resolve_adapter()
         return adapter is not None and not degraded
 
     # ------------------------------------------------------------------ 分析
-    def analyze(self, graph) -> OperatorAnalysis:
-        return self.registry.analyze(graph)
+    def analyze(self, graph, precision: Optional[str] = None) -> OperatorAnalysis:
+        return self.registry.analyze(graph, precision=precision or self.config.precision)
 
     # ------------------------------------------------------------------ 编译
     def compile(self, xpu_graph: XpuGraph, output_path: str, config: Optional[KunlunConfig] = None) -> BackendArtifact:
@@ -290,12 +412,13 @@ class KunlunBackend(BaseBackend):
         adapter, degraded = self._resolve_adapter(config)
         if adapter is None:
             raise BackendNotAvailableError(
-                "无可用的昆仑 SDK 适配器, 且未允许降级生成占位产物"
+                "未检测到可用的昆仑 SDK 后端适配器(Paddle Inference / XPU Toolkit), "
+                "且未允许降级生成占位产物"
             )
         if degraded and not config.allow_degraded:
             raise BackendNotAvailableError(
-                "未检测到昆仑 SDK(候选: {}), 且 allow_degraded=False, 拒绝生成占位产物。"
-                "请安装昆仑 SDK 或改用 sdk_adapter=xpuctl".format(", ".join(XPU_TOOLKIT_MODULES))
+                "未检测到真实昆仑后端(Paddle Inference / XPU Toolkit), 且 allow_degraded=False, "
+                "拒绝生成占位产物。请安装 paddlepaddle-xpu + x2paddle, 或显式使用 --allow-degraded 联调"
             )
 
         artifact = adapter.compile(xpu_graph, output_path, config)
@@ -303,7 +426,7 @@ class KunlunBackend(BaseBackend):
         artifact.metadata.setdefault("target_chip", config.target_chip)
         artifact.metadata.setdefault("graph", xpu_graph.to_dict())
         if degraded:
-            artifact.notes.append("sdk_adapter=stub: 编译层尚未落到真实昆仑 SDK API(建设目标 §17)")
+            artifact.notes.append("sdk_adapter=stub: 未接入真实昆仑后端, 产物仅供链路联调")
         self._write_metadata(artifact, output_path)
         if xpu_graph.onnx_path:
             write_compile_report(xpu_graph, str(Path(output_path).parent), {"sdk_adapter": artifact.sdk_adapter})
@@ -336,7 +459,7 @@ class KunlunBackend(BaseBackend):
             raise BackendNotAvailableError("不支持的 sdk_adapter: {}".format(requested))
         if not adapter_cls.available():
             raise BackendNotAvailableError(
-                "sdk_adapter={} 在当前环境不可用(缺少对应 SDK 模块)".format(requested)
+                "sdk_adapter={} 在当前环境不可用(缺少对应 SDK/依赖)".format(requested)
             )
         return adapter_cls(), False
 

@@ -66,6 +66,15 @@ def hardware_config_dir() -> Path:
     return configs_dir() / "hardware"
 
 
+def deployment_config_dir() -> Path:
+    """交付/部署环境配置目录 (``configs/deployment``)。
+
+    与 Hardware Capability 分离: base_image / packages / minio / kafka 属于
+    **部署环境**, 不应混进昆仑 XPU 硬件能力配置(ChatGPT 修改意见 §26/§27)。
+    """
+    return configs_dir() / "deployment"
+
+
 def docker_template_dir(hardware: str = "kunlun") -> Path:
     return templates_dir() / "docker" / hardware
 
@@ -76,3 +85,13 @@ def model_config_path(model_type: str) -> Path:
 
 def hardware_config_path(hardware: str) -> Path:
     return hardware_config_dir() / "{}.yaml".format(hardware)
+
+
+def hardware_capabilities_path(hardware: str) -> Path:
+    """算子能力表路径 (``configs/hardware/<hardware>_capabilities.yaml``)。"""
+    return hardware_config_dir() / "{}_capabilities.yaml".format(hardware)
+
+
+def deployment_config_path(hardware: str) -> Path:
+    """交付/部署配置路径 (``configs/deployment/<hardware>_docker.yaml``)。"""
+    return deployment_config_dir() / "{}_docker.yaml".format(hardware)

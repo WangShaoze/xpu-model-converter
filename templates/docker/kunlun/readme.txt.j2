@@ -7,7 +7,7 @@
 模型: {{ model_name }} ({{ model_version }})   任务: {{ task }}   精度: {{ precision }}   后端: {{ hardware }}
 本包文件名、镜像名、容器名与接口参数均由 manifest.json 统一生成, 不会出现描述与实际文件不一致的情况。
 {% if degraded %}
-!! 注意: 本次导出时未检测到昆仑 SDK, model/model.xpu 为占位产物(内容为规范化 ONNX), 仅供链路联调, 请勿交付客户。
+!! 注意: 本次导出时未检测到昆仑 SDK, model/{{ model_file }} 为占位产物(内容为规范化 ONNX), 仅供链路联调, 请勿交付客户。
    请在具备昆仑 SDK 的环境中以 sdk_adapter=xpuctl 重新执行编译与导出。
 {% endif %}
 二、部署方式{% if image_tar %}(推荐: 镜像 tar 加载){% else %}(推荐: 本地构建){% endif %}
@@ -23,7 +23,7 @@ $ docker run -d \
   --privileged --device=/dev/xpuctrl \
   --restart=always \
   {{ image_full }}
-  注: 容器内 DEVICE 默认 auto, 自动探测 XPU 卡; 若未透传加速卡会自动降级 CPU(可用但较慢)。
+  注: 容器内 DEVICE 默认 auto, 自动探测 XPU 卡; 未透传加速卡时 XPU/Paddle 产物将拒绝启动(不静默降级 CPU), 需 DEVICE=cpu 才在 CPU 上联调。
 3、容器内配置覆盖(可选, 不设置则使用镜像内默认值)
 $ docker run ... -e DEVICE=xpu -e workers=2 -e WEB_PORT={{ web_port }} -e KAFKA_HOST=10.10.65.105 ...
 {% else %}
@@ -37,7 +37,7 @@ $ docker run -d \
   --privileged --device=/dev/xpuctrl \
   --restart=always \
   {{ image_full }}
-  注: 容器内 DEVICE 默认 auto, 自动探测 XPU 卡; 若未透传加速卡会自动降级 CPU(可用但较慢)。
+  注: 容器内 DEVICE 默认 auto, 自动探测 XPU 卡; 未透传加速卡时 XPU/Paddle 产物将拒绝启动(不静默降级 CPU), 需 DEVICE=cpu 才在 CPU 上联调。
 3、容器内配置覆盖(可选, 不设置则使用镜像内默认值)
 $ docker run ... -e DEVICE=xpu -e workers=2 -e WEB_PORT={{ web_port }} -e KAFKA_HOST=10.10.65.105 ...
 {% endif %}
@@ -75,7 +75,7 @@ build.sh               自动部署脚本
 install.conf           部署参数备忘(与 Dockerfile ENV 一致)
 packages/              额外依赖轮子(可为空)
 runtime.tgz            公共 Runtime(所有模型共用, 与模型解耦)
-model/model.xpu        编译后的模型
+model/{{ model_file }}        编译后的模型
 model/model.yaml       本次转换任务描述(Manifest YAML)
 model/metadata.json    编译产物元信息(后端/精度/SDK)
 config/confidence.json 类别与阈值配置

@@ -112,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     package_parser.add_argument("--runtime", default=None, help="Runtime 类型, 默认 detection")
     package_parser.add_argument("--image-tar", dest="image_tar", default=None,
                                 help="包内已有的镜像 tar 文件名(README 据此描述部署方式)")
+    package_parser.add_argument("--dev-package", dest="dev_package", action="store_true",
+                                help="允许把 degraded 占位产物打入 Docker 交付包(仅供开发联调, 默认禁止)")
     package_parser.set_defaults(handler=cmd_package)
 
     return parser
@@ -140,8 +142,10 @@ def _add_pipeline_args(parser: argparse.ArgumentParser, default_output: str,
     if with_docker_flag:
         parser.add_argument("--docker", dest="docker_flag", action="store_true",
                             help="生成 Docker 交付包(默认开启, 与 --no-docker 互斥)")
-    parser.add_argument("--strict", action="store_true",
-                        help="缺少昆仑 SDK 时直接失败, 不允许生成降级占位产物")
+    parser.add_argument("--allow-degraded", dest="allow_degraded", action="store_true",
+                        help="缺少真实昆仑后端时允许生成降级占位产物(仅供开发联调, 默认禁止)")
+    parser.add_argument("--dev-package", dest="dev_package", action="store_true",
+                        help="允许把 degraded 占位产物打入 Docker 交付包(仅供开发联调, 默认禁止)")
     parser.add_argument("--json", default=None, help="把转换结果写到指定 JSON 文件")
 
 

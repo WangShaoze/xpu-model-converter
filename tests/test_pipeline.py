@@ -8,7 +8,8 @@ PyTorch 前端: 它沿用 YOLOv10 的 model_type, 但直接把合成 ONNX 图当
 1. ``[01] … [10]`` 十个步骤全部 OK;
 2. 产物目录包含 onnx / xpu / package 三部分;
 3. 交付 ZIP 内 manifest.json 与文件清单一致(交付层一致性, 建设目标 §15);
-4. SDK 缺失时 ``degraded`` 标记贯穿 manifest / metadata。
+4. 仅在**显式**打开降级开关(``allow_degraded`` / ``allow_degraded_package``)时,
+   SDK 缺失才允许产出降级占位件; 默认严格模式下必须直接失败。
 """
 import io
 import json
@@ -24,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests import _models
+from tests import requires_onnx
 from xpu_converter.frontend.base import BaseModelAdapter, FrontendModel
 from xpu_converter.ir import onnx as onnx_ir
 from xpu_converter.registry import model_registry
@@ -74,6 +76,7 @@ class SyntheticYoloAdapter(BaseModelAdapter):
         )
 
 
+@requires_onnx
 class PipelineEndToEndTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="xpu_pipeline_"))
@@ -103,6 +106,10 @@ class PipelineEndToEndTest(unittest.TestCase):
             input_shape=list(INPUT_SHAPE),
             precision="fp16",
             benchmark_iterations=3,
+            # 本机没有昆仑 SDK, 显式打开降级开关才能跑通 stub 联调链路
+            sdk_adapter="stub",
+            allow_degraded=True,
+            allow_degraded_package=True,
         )
 
         captured = io.StringIO()
@@ -121,13 +128,16 @@ class PipelineEndToEndTest(unittest.TestCase):
         self.assertTrue(Path(result.optimized_onnx_path).is_file())
         self.assertTrue(Path(result.artifact.model_path).is_file())
         self.assertTrue(Path(result.package_zip).is_file())
+        # 2b) Final Operator Check 必须在编译前产出报告且通过
+        self.assertIsNotNone(result.capability)
+        self.assertTrue(result.capability.ok, result.capability.reasons)
 
         # 3) 交付包结构与 manifest 一致性
         package_dir = Path(result.package_dir)
         for relative in (
             "Dockerfile", "build.sh", "install.conf", "readme.txt", "start.sh",
             "manifest.json", "runtime.tgz",
-            "model/model.xpu", "model/model.yaml", "model/metadata.json",
+            "model/model.onnx", "model/model.yaml", "model/metadata.json",
             "config/confidence.json", "config/runtime.yaml",
         ):
             self.assertTrue((package_dir / relative).is_file(), "缺少交付文件: " + relative)
@@ -164,6 +174,9 @@ class PipelineEndToEndTest(unittest.TestCase):
             model_type=SyntheticYoloAdapter.model_type,
             input_shape=list(INPUT_SHAPE),
             benchmark_iterations=2,
+            sdk_adapter="stub",
+            allow_degraded=True,
+            allow_degraded_package=True,
         )
         with redirect_stdout(io.StringIO()):
             result = pipeline.run()
@@ -177,6 +190,35 @@ class PipelineEndToEndTest(unittest.TestCase):
             if p.is_file()
         }
         self.assertEqual({name[len(prefix):] for name in names}, expected)
+
+    def test_strict_mode_rejects_degraded_artifact(self):
+        """默认严格模式: 无昆仑 SDK 时直接失败, 不允许静默产出占位件。
+
+        本机可能装有 paddle + x2paddle(auto 会解析到真实 Paddle 后端), 因此这里
+        显式模拟"无可用 SDK"的环境, 验证严格模式下的失败行为。
+        """
+        from unittest import mock
+
+        from xpu_converter.errors import XpuConverterError
+        from xpu_converter.pipeline import ConversionPipeline
+
+        model_file = self.tmp / "best.pt"
+        model_file.write_bytes(b"synthetic")
+        pipeline = ConversionPipeline(
+            model_path=str(model_file),
+            output_dir=str(self.tmp / "output3"),
+            model_type=SyntheticYoloAdapter.model_type,
+            input_shape=list(INPUT_SHAPE),
+            benchmark_iterations=1,
+        )
+        unavailable = mock.patch(
+            "xpu_converter.backend.kunlun.compiler.PaddleXpuSdkAdapter.available",
+            return_value=False,
+        )
+        with unavailable, redirect_stdout(io.StringIO()):
+            with self.assertRaises(XpuConverterError) as ctx:
+                pipeline.run()
+        self.assertIn("SDK", str(ctx.exception))
 
 
 if __name__ == "__main__":

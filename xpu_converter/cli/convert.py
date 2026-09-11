@@ -69,7 +69,8 @@ def _run_pipeline(args, default_output: str) -> int:
         validation_enabled=validation_enabled,
         benchmark_iterations=getattr(args, "benchmark_iterations", 50) or 50,
         export_docker=not getattr(args, "no_docker", False),
-        allow_degraded=not getattr(args, "strict", False),
+        allow_degraded=bool(getattr(args, "allow_degraded", False)),
+        allow_degraded_package=bool(getattr(args, "dev_package", False)),
     )
     if manifest:
         print("已加载 manifest: {} (name={}, version={})".format(

@@ -161,6 +161,17 @@ class Graph:
         cloned.raw = copy.deepcopy(self.raw)
         return cloned
 
+    def restore(self, snapshot: "Graph") -> "Graph":
+        """从 :meth:`copy` 得到的快照回滚自身(用于 Pass/Rewrite 失败时的事务回滚)。"""
+        self.nodes = [Node.from_dict(n.to_dict()) for n in snapshot.nodes]
+        self.inputs = [Tensor.from_dict(t.to_dict()) for t in snapshot.inputs]
+        self.outputs = [Tensor.from_dict(t.to_dict()) for t in snapshot.outputs]
+        self.initializers = {k: Tensor.from_dict(v.to_dict()) for k, v in snapshot.initializers.items()}
+        self.value_info = {k: Tensor.from_dict(v.to_dict()) for k, v in snapshot.value_info.items()}
+        self.opset = snapshot.opset
+        self.raw = copy.deepcopy(snapshot.raw)
+        return self
+
     # ------------------------------------------------------------------ 工具
     def infer_shapes(self) -> bool:
         """对 raw 执行 ONNX shape inference 并刷新视图。"""

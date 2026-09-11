@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional, Type
 from xpu_converter.backend.base import BaseBackend
 from xpu_converter.backend.kunlun.compiler import KunlunBackend
 from xpu_converter.backend.kunlun.config import KunlunConfig
-from xpu_converter.config import HardwareConfig
+from xpu_converter.config import HardwareConfig, deep_merge, load_yaml
 from xpu_converter.errors import ConfigError, NotSupportedError
-from xpu_converter.paths import hardware_config_path
+from xpu_converter.paths import deployment_config_path, hardware_config_path
 
 _BACKENDS: Dict[str, Type[BaseBackend]] = {}
 
@@ -36,10 +36,22 @@ def get_backend_class(hardware: str) -> Type[BaseBackend]:
 
 
 def resolve_hardware_config(hardware: str, overrides: Optional[Dict[str, Any]] = None) -> HardwareConfig:
-    """读取硬件配置并应用覆盖项(如 ``--precision fp16``)。"""
+    """读取硬件配置并应用覆盖项(如 ``--precision fp16``)。
+
+    配置分两处, 职责分离(ChatGPT 修改意见 §26/§27):
+    - ``configs/hardware/<hardware>.yaml``   硬件能力(sdk/chip/precision/device)
+    - ``configs/deployment/<hardware>_docker.yaml`` 部署环境(base_image/docker/log)
+    两者合并为同一个 :class:`HardwareConfig`, 上层无需感知拆分。
+    """
     get_backend_class(hardware)
-    path = hardware_config_path(hardware)
-    config = HardwareConfig.from_yaml(path) if path.is_file() else HardwareConfig(name=hardware)
+    data: Dict[str, Any] = {}
+    hw_path = hardware_config_path(hardware)
+    if hw_path.is_file():
+        data = deep_merge(data, load_yaml(hw_path))
+    deploy_path = deployment_config_path(hardware)
+    if deploy_path.is_file():
+        data = deep_merge(data, load_yaml(deploy_path))
+    config = HardwareConfig.from_dict(data) if data else HardwareConfig(name=hardware)
     for key, value in (overrides or {}).items():
         if value is None:
             continue

@@ -22,10 +22,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tests import _models
+from tests import requires_onnx
 from xpu_converter.backend.kunlun import KunlunBackend, KunlunConfig, XpuGraphBuilder
 from xpu_converter.config import BuildManifest, HardwareConfig, ModelConfig
 from xpu_converter.exporter.docker_exporter import DockerExporter, RuntimePackager
-from xpu_converter.exporter.manifest import MANIFEST_FILENAME, sha256_file
+from xpu_converter.exporter.manifest import (
+    ARTIFACT_MANIFEST_FILENAME,
+    MANIFEST_FILENAME,
+    sha256_file,
+)
 from xpu_converter.ir import onnx as onnx_ir
 
 INPUT_SHAPE = [1, 3, 32, 32]
@@ -46,11 +51,12 @@ def build_stub_artifact(workdir: Path):
         workdir=str(xpu_dir),
         input_shapes={graph.inputs[0].name: list(INPUT_SHAPE)},
     )
-    backend = KunlunBackend(KunlunConfig(sdk_adapter="stub", precision="fp16"))
+    backend = KunlunBackend(KunlunConfig(sdk_adapter="stub", precision="fp16", allow_degraded=True))
     artifact = backend.compile(xpu_graph, str(xpu_dir / "model.xpu"))
     return artifact, source
 
 
+@requires_onnx
 class ExporterTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="xpu_exporter_"))
@@ -159,6 +165,27 @@ class ExporterTest(unittest.TestCase):
         self.assertTrue(all(name.startswith(prefix) for name in names), names)
         self.assertTrue(prefix + "manifest.json" in names)
 
+    # ------------------------------------------------------------------ provenance
+    def test_artifact_manifest_records_provenance(self):
+        """artifact.json 记录产物来源与编译信息; model.yaml 只描述"如何产生"(§28/§29/§30)。"""
+        import yaml
+
+        package_dir = self._export("pkg_provenance")
+        artifact_path = package_dir / "model" / ARTIFACT_MANIFEST_FILENAME
+        self.assertTrue(artifact_path.is_file())
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        for key in ("converter", "source", "export", "optimization", "backend", "artifact"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["artifact"]["file"], Path(self.artifact.model_path).name)
+        self.assertEqual(payload["artifact"]["sha256"], sha256_file(self.artifact.model_path))
+        self.assertTrue(payload["converter"]["version"])
+        self.assertEqual(payload["export"]["input_shape"], list(INPUT_SHAPE))
+
+        model_yaml = yaml.safe_load((package_dir / "model" / "model.yaml").read_text(encoding="utf-8"))
+        self.assertNotIn("package", model_yaml)
+        self.assertNotIn("runtime", model_yaml)
+        self.assertIn("source", model_yaml)
+
     # ------------------------------------------------------------------ 内部
     def _export(self, name: str, packages_dir=None, docker_packages_dir=None,
                 image_tar=None) -> Path:
@@ -191,6 +218,8 @@ class ExporterTest(unittest.TestCase):
             hardware_config=hardware_config,
             runtime="detection",
             packages_dir=packages_dir,
+            # 本用例用 stub 占位产物验证打包机制, 需显式允许降级产物入包
+            allow_degraded=True,
         )
         exporter.export(
             model_path=self.artifact.model_path,

@@ -5,10 +5,12 @@ import unittest
 import numpy as np
 
 from tests import _models
+from tests import requires_onnx
 from xpu_converter.ir import onnx as onnx_ir
 from xpu_converter.rewrite.registry import default_registry
 
 
+@requires_onnx
 class TestSiluRewrite(unittest.TestCase):
     def test_silu_decomposed_and_equivalent(self):
         """Silu 被拆成 Sigmoid+Mul 后, 计算结果应与 x*sigmoid(x) 一致。"""

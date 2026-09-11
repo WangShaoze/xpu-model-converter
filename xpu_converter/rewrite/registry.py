@@ -18,6 +18,8 @@ class RewriteResult:
     applied_count: int = 0
     notes: List[str] = field(default_factory=list)
     per_rule: Dict[str, int] = field(default_factory=dict)
+    # 非空表示整批改写因产出非法图被回滚(ChatGPT 修改意见 §36)
+    rolled_back: str = ""
 
     @property
     def changed(self) -> bool:
@@ -29,6 +31,7 @@ class RewriteResult:
             "applied_count": self.applied_count,
             "applied_rules": list(self.applied_rules),
             "per_rule": dict(self.per_rule),
+            "rolled_back": self.rolled_back,
             "notes": list(self.notes),
         }
 
@@ -59,11 +62,15 @@ class RewriteRegistry:
 
     # ------------------------------------------------------------- 执行
     def apply(self, graph: Graph, only: Optional[Sequence[str]] = None) -> RewriteResult:
+        from xpu_converter.ir import onnx as onnx_ir
+
         result = RewriteResult()
         if not graph.has_raw:
             result.notes.append("图无原始 ModelProto, 跳过改写")
             return result
 
+        # 改写是"事务": 先快照, 产出非法图则整体回滚(ChatGPT 修改意见 §36)
+        snapshot = graph.copy()
         selected = set(only) if only else None
         for rule in self.rules:
             if selected is not None and rule.name not in selected:
@@ -101,6 +108,15 @@ class RewriteRegistry:
 
         if result.changed:
             graph.refresh()
+            problem = onnx_ir.check_model(graph.raw)
+            if problem:
+                graph.restore(snapshot)
+                result.rolled_back = problem
+                result.applied_count = 0
+                result.applied_rules = []
+                result.per_rule = {}
+                result.notes.append("改写结果图非法, 已整体回滚: {}".format(problem))
+                logger.warning("改写回滚: %s", problem)
         return result
 
 

@@ -11,6 +11,8 @@
 Validator 与 Runtime 服务不需要区分后端类型。
 """
 import importlib
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from xpu_converter.backend.base import BaseRuntimeSession
@@ -122,15 +124,19 @@ class XpuToolkitRuntimeSession(BaseRuntimeSession):
 
 
 class PaddleXpuRuntimeSession(BaseRuntimeSession):
-    """Paddle Inference + XPU 会话。
+    """Paddle Inference 会话(XPU / CPU)。
 
-    TODO(SDK): Paddle XPU 的 device 与 precision 开关在不同昆仑镜像版本中存在
-    差异, 待确认镜像版本后在此补全。
+    交付产物是**设备无关**的 Paddle 静态图(``model.pdmodel`` + ``model.pdiparams``),
+    由 Paddle 在**加载时**按设备编译 XPU kernel:
+
+    * ``DEVICE=xpu``  : ``enable_xpu()`` + ``set_xpu_device_id()``
+    * ``DEVICE=cpu``  : 关闭 GPU/XPU, 走 CPU 数学库
+    * ``DEVICE=auto`` : 仅当本机确实有可用 XPU 卡时才用 XPU, 否则退 CPU
     """
 
     backend_name = "paddle-xpu"
 
-    def __init__(self, model_path: str, device: str = "auto") -> None:
+    def __init__(self, model_path: str, device: str = "auto", params_path: Optional[str] = None) -> None:
         try:
             from paddle import inference
         except ImportError as err:  # pragma: no cover - 依赖缺失
@@ -139,17 +145,64 @@ class PaddleXpuRuntimeSession(BaseRuntimeSession):
             raise BackendNotAvailableError("当前 paddle 版本不支持 inference.Config")
         self._inference = inference
         self._model_path = model_path
-        self._device = device
+        self._params_path = params_path or self._resolve_params(model_path)
+        self._device = self._resolve_device(device)
         self._predictor = self._create_predictor()
 
+    @staticmethod
+    def _resolve_params(model_path: str) -> Optional[str]:
+        """Paddle 静态图参数文件与 program 同名同目录。"""
+        candidate = Path(model_path).with_suffix(".pdiparams")
+        return str(candidate) if candidate.is_file() else None
+
+    @staticmethod
+    def _xpu_available() -> bool:
+        """本机是否存在可用的昆仑 XPU 卡。"""
+        try:
+            import paddle
+
+            if not bool(getattr(paddle.device, "is_compiled_with_xpu", lambda: False)()):
+                return False
+            xpu = getattr(paddle.device, "xpu", None)
+            counter = getattr(xpu, "device_count", None)
+            if callable(counter):
+                return int(counter()) > 0
+            return os.path.exists("/dev/xpuctrl")
+        except Exception:
+            return os.path.exists("/dev/xpuctrl")
+
+    def _resolve_device(self, device: str) -> str:
+        value = str(device or "auto").lower()
+        if value in ("xpu", "kunlun"):
+            return "xpu"
+        if value == "cpu":
+            return "cpu"
+        return "xpu" if self._xpu_available() else "cpu"
+
+    @staticmethod
+    def _device_id() -> int:
+        value = os.environ.get("GPU_ID") or os.environ.get("XPU_DEVICE_ID") or ""
+        return int(value) if str(value).strip().isdigit() else 0
+
     def _create_predictor(self):
-        config = self._inference.Config(self._model_path)
+        if self._params_path:
+            config = self._inference.Config(self._model_path, self._params_path)
+        else:
+            config = self._inference.Config(self._model_path)
         config.disable_glog_info()
-        if str(self._device).lower() != "cpu" and hasattr(config, "enable_xpu"):
-            # TODO(SDK): 依据实际昆仑镜像版本确认 xpu 设备号获取方式
-            config.enable_xpu(0)
+        if self._device == "xpu":
+            if not hasattr(config, "enable_xpu"):
+                raise BackendNotAvailableError(
+                    "当前 Paddle 未编译 XPU 支持, 无法加载 XPU 产物: {}".format(self._model_path)
+                )
+            config.disable_mkldnn()
+            config.enable_xpu()
+            if hasattr(config, "set_xpu_device_id"):
+                config.set_xpu_device_id(self._device_id())
         else:
             config.disable_gpu()
+            if hasattr(config, "disable_xpu"):
+                config.disable_xpu()
             config.set_cpu_math_library_num_threads(4)
         return self._inference.create_predictor(config)
 
@@ -160,6 +213,15 @@ class PaddleXpuRuntimeSession(BaseRuntimeSession):
     @property
     def output_names(self) -> List[str]:
         return list(self._predictor.get_output_names())
+
+    def input_shapes(self) -> Dict[str, tuple]:
+        shapes: Dict[str, tuple] = {}
+        for name in self.input_names:
+            try:
+                shapes[name] = tuple(self._predictor.get_input_handle(name).shape())
+            except Exception:
+                continue
+        return shapes
 
     def run(self, inputs: Dict[str, Any]) -> List[Any]:
         import numpy as np

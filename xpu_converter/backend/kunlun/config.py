@@ -29,8 +29,9 @@ class KunlunConfig:
     num_classes: int = 80
     output_layout: str = "auto"
     model_name: str = "model"
-    # SDK 缺失时是否允许生成占位产物(默认允许, 便于在 SDK 落地前打通全链路)
-    allow_degraded: bool = True
+    # SDK 缺失时是否允许生成占位产物。默认 False: 生产链路在缺少真实后端时直接失败,
+    # 只有显式打开(CLI --allow-degraded)才允许生成仅供联调的占位件。
+    allow_degraded: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -76,6 +77,7 @@ class KunlunConfig:
             "precision": getattr(hardware, "precision", "fp16"),
             "device": getattr(hardware, "device", "auto"),
             "optimization_level": getattr(hardware, "optimization_level", 2),
+            "allow_degraded": getattr(hardware, "allow_degraded", False),
         }
         data.update({k: v for k, v in (overrides or {}).items() if v is not None})
         return cls.from_dict(data)

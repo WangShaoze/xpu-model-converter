@@ -37,16 +37,22 @@ class StepReporter:
         """延迟解析输出流, 保证 stdout 重定向(CLI / 测试)能够生效。"""
         return self._stream or sys.stdout
 
-    def step(self, title: str, ok: bool = True, detail: str = "") -> None:
+    def step(self, title: str, ok: bool = True, detail: str = "", skipped: bool = False) -> None:
         self.index += 1
         padded = "[{:02d}]".format(self.index)
-        status = "OK" if ok else "FAIL"
+        if skipped:
+            status = "SKIPPED"
+        else:
+            status = "OK" if ok else "FAIL"
         line = "{} {} {}".format(padded, title, status)
         print(line, file=self.stream)
         if detail:
             for raw in str(detail).splitlines():
                 print("     {}".format(raw), file=self.stream)
-        self.records.append({"index": self.index, "title": title, "ok": bool(ok), "detail": detail})
+        self.records.append({
+            "index": self.index, "title": title, "ok": bool(ok),
+            "skipped": bool(skipped), "detail": detail,
+        })
 
     def info(self, text: str) -> None:
         print("     {}".format(text), file=self.stream)

@@ -1,0 +1,37 @@
+# 昆仑芯交付/部署环境配置(ChatGPT 修改意见 §26/§27)
+# 这里的 base_image / packages / minio / kafka 属于**部署环境**, 不是 "昆仑 XPU
+# 硬件能力", 因此从 configs/hardware/kunlun.yaml 拆出。运行时由
+# resolve_hardware_config() 与硬件配置合并成同一个 HardwareConfig 对象。
+#
+# base_image 与客户现场服务器保持一致
+base_image: iregistry.baidu-int.com/ai-station/kunlun2-paddlepaddle_2_6_1-py310-cv:v20260121
+
+runtime:
+  api_version: v1
+  type: detection
+  port: 58025
+  workers: 1
+  conf_thres: 0.25
+  iou_thres: 0.45
+
+docker:
+  template: kunlun
+  include_packages: true
+  include_paddle: true
+  # 本地依赖轮子目录: 不为空时把其中的 .whl/.tar.gz/.zip 复制进交付包 packages/,
+  # 供 Dockerfile 内 `pip install /tmp/packages/*.whl --no-deps` 使用。
+  # 参考集合: Flask / Werkzeug / Jinja2 / click / itsdangerous / gunicorn /
+  #          minio / kafka_python / urllib3 / certifi / pytz / Cython
+  #          onnxruntime(降级占位产物走仿真加载必需, 基础镜像不含)
+  packages_dir: "vendor/wheels"
+  # 日志上报(minio/kafka)默认地址, 客户现场用 docker run -e 或 install.conf 注入。
+  # 不写默认口令, 避免随交付模板泄露。
+  log:
+    minio_host: ""
+    minio_port: ""
+    minio_bucket: ""
+    minio_access_key: ""
+    minio_secret_key: ""
+    kafka_host: ""
+    kafka_port: ""
+    kafka_topic: ""

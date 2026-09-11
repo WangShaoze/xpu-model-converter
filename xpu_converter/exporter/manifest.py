@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from xpu_converter.version import CONVERTER_VERSION, RUNTIME_API_VERSION
 
 MANIFEST_FILENAME = "manifest.json"
+ARTIFACT_MANIFEST_FILENAME = "artifact.json"
 
 # 产物文件名约定
 ARTIFACT_FILENAME = "model.xpu"
@@ -183,6 +184,7 @@ def build_manifest(
     input_spec: Optional[Dict[str, Any]] = None,
     runtime_spec: Optional[Dict[str, Any]] = None,
     artifact: Optional[Any] = None,
+    model_file: Optional[str] = None,
     source: Optional[Dict[str, Any]] = None,
     validation: Optional[Dict[str, Any]] = None,
     benchmark: Optional[Dict[str, Any]] = None,
@@ -213,10 +215,81 @@ def build_manifest(
         source=dict(source or {}),
         target={"hardware": hardware, "precision": precision,
                 "target_chip": getattr(artifact, "target_chip", "auto"),
-                "model_file": ARTIFACT_FILENAME},
+                "model_file": model_file or getattr(artifact, "model_file", "") or ARTIFACT_FILENAME},
         validation=dict(validation or {}),
         benchmark=dict(benchmark or {}),
         image=dict(image or {"name": name, "tag": version, "tar": ""}),
         runtime_package=dict(runtime_package or {}),
         notes=list(notes or []),
     )
+
+
+def build_artifact_manifest(
+    artifact: Optional[Any],
+    model_files: Optional[List[Any]] = None,
+    model_config: Optional[Any] = None,
+    hardware_config: Optional[Any] = None,
+    source: Optional[Dict[str, Any]] = None,
+    optimization: Optional[Dict[str, Any]] = None,
+    hardware: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """构造 ``artifact.json``(ChatGPT 修改意见 §29 / §30)。
+
+    与 ``manifest.json``(交付包里有什么) 不同, ``artifact.json`` 只描述**产物
+    自身的来源与编译信息**: 从哪个 checkpoint(含 SHA256)、用什么导出/优化/后端
+    编译出来的, 以及最终产物的文件与 SHA256。三者关系::
+
+        build.yaml(model.yaml) -> artifact.json -> manifest.json
+    """
+    files = [Path(item) for item in (model_files or []) if item]
+    primary = files[0] if files else None
+    source_spec = dict(source or {})
+    if hardware is None:
+        hardware_spec: Dict[str, Any] = {}
+    elif hasattr(hardware, "to_dict"):
+        hardware_spec = dict(hardware.to_dict())
+    else:
+        hardware_spec = dict(hardware)
+
+    def _value(*candidates):
+        for candidate in candidates:
+            if candidate:
+                return candidate
+        return ""
+
+    artifact_files = [
+        {"file": path.name, "sha256": sha256_file(path)}
+        for path in files if path.is_file()
+    ]
+    return {
+        "artifact_format": getattr(artifact, "artifact_format", "") or "",
+        "converter": {"name": "xpu-model-converter", "version": CONVERTER_VERSION},
+        "source": {
+            "framework": _value(source_spec.get("framework"),
+                                 getattr(model_config, "framework", "")),
+            "framework_version": source_spec.get("source_framework_version", ""),
+            "model_type": _value(source_spec.get("model_type"),
+                                 getattr(model_config, "model_type", "")),
+            "checkpoint": source_spec.get("checkpoint", ""),
+            "model_sha256": source_spec.get("model_sha256", ""),
+        },
+        "export": {
+            "onnx_opset": int(getattr(model_config, "opset", 0) or 0),
+            "input_shape": list(getattr(model_config, "input_shape", []) or []),
+        },
+        "optimization": dict(optimization or {}),
+        "backend": {
+            "name": getattr(hardware_config, "name", "") or "",
+            "chip": _value(hardware_spec.get("chip"),
+                           getattr(hardware_config, "target_chip", "")),
+            "sdk_version": hardware_spec.get("sdk_version", ""),
+            "compiler_version": hardware_spec.get("compiler_version", ""),
+        },
+        "precision": _value(getattr(artifact, "precision", ""),
+                            getattr(hardware_config, "precision", "")),
+        "artifact": {
+            "file": primary.name if primary else "",
+            "sha256": artifact_files[0]["sha256"] if artifact_files else "",
+            "files": artifact_files,
+        },
+    }

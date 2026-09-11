@@ -1,131 +1,152 @@
 # -*- coding: utf-8 -*-
-"""昆仑芯算子支持表与算子分析器。
+"""昆仑芯算子注册表(Capability-driven)。
 
-本模块只维护"算子名 → 支持情况"这一层知识, 与后端 SDK 版本无关:
-
-- ``NATIVE_OPS``   : 昆仑 XPU 原生支持的算子(可直接编译下发)
-- ``REWRITE_OPS``  : 通过 :mod:`xpu_converter.rewrite` 改写后可支持的算子
-
-真正的 SDK 相关差异(型号、XTCL 版本)通过 :meth:`KunlunOperatorRegistry.with_extra`
-增量注入, 避免把支持表写死。
+历史实现把支持情况简化成 ``Set[str]``, 无法表达"``Resize`` 只支持 nearest"
+这类约束(ChatGPT 修改意见 §7)。现在本模块只是
+:class:`xpu_converter.capability.operators.OperatorCapabilitySet` 的薄封装:
+能力数据来自 ``configs/hardware/<hardware>_capabilities.yaml``, 判定时带上
+dtype / 属性 / opset。
 """
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from xpu_converter.backend.base import OperatorAnalysis, OperatorAnalysisResult
+from xpu_converter.capability.operators import (
+    REWRITTEN,
+    SUPPORTED,
+    UNSUPPORTED,
+    OperatorCapability,
+    OperatorCapabilitySet,
+)
+from xpu_converter.paths import hardware_capabilities_path
 
 # 自定义域算子(如 com.microsoft / com.baidu)默认视为不支持, 需显式登记
 DEFAULT_DOMAINS = ("", "ai.onnx", "ai.onnx.ml")
 
-# 昆仑 XPU 原生算子(覆盖 V1 检测/分类/分割常见结构)
-NATIVE_OPS: Set[str] = {
-    # ---- 卷积 / 池化 ----
+# 兼容旧接口: 若能力表文件缺失, 用这里的基线算子名构造能力集
+FALLBACK_NATIVE_OPS: Set[str] = {
     "Conv", "ConvTranspose", "MaxPool", "AveragePool", "GlobalAveragePool",
-    "GlobalMaxPool", "LpPool", "MaxUnpool", "RoiAlign",
-    # ---- 归一化 ----
-    "BatchNormalization", "InstanceNormalization", "GroupNormalization",
-    "LayerNormalization", "LRN", "MeanVarianceNormalization",
-    # ---- 激活 ----
-    "Relu", "LeakyRelu", "PRelu", "Sigmoid", "Tanh", "HardSigmoid", "HardSwish",
-    "Elu", "Selu", "Softplus", "Softsign", "Gelu", "Erf", "Clip",
-    "ThresholdedRelu", "Celu",
-    # ---- 矩阵 / 全连接 ----
-    "Gemm", "MatMul", "Einsum", "Trilu",
-    # ---- 逐元素数学 ----
-    "Add", "Sub", "Mul", "Div", "Pow", "Sqrt", "Exp", "Log", "Abs", "Neg",
-    "Floor", "Ceil", "Round", "Reciprocal", "Sign", "Max", "Min", "Sum",
-    "Mean", "Mod", "CumSum",
-    # ---- 逻辑 / 比较 ----
-    "Equal", "Greater", "GreaterOrEqual", "Less", "LessOrEqual", "And", "Or",
-    "Not", "Xor", "IsNaN", "IsInf",
-    # ---- 张量变形 ----
-    "Reshape", "Squeeze", "Unsqueeze", "Transpose", "Flatten", "Expand", "Tile",
-    "Pad", "Concat", "Split", "Slice", "DepthToSpace", "SpaceToDepth",
-    "Identity", "Constant", "ConstantOfShape", "Cast", "CastLike",
-    "Resize", "Upsample", "Where", "Range", "Compress", "EyeLike",
-    # ---- 索引 / 聚合 ----
-    "Gather", "GatherElements", "GatherND", "ScatterElements", "ScatterND",
-    "Shape", "Size", "NonZero", "TopK", "ArgMax", "ArgMin", "OneHot",
-    "ReduceMax", "ReduceMin", "ReduceMean", "ReduceSum", "ReduceProd",
-    "ReduceL1", "ReduceL2", "ReduceLogSum", "ReduceLogSumExp",
-    "ReduceSumSquare", "ReduceSqrt",
-    # ---- 概率 ----
-    "Softmax", "LogSoftmax", "Dropout",
-    # ---- 循环网络 ----
+    "GlobalMaxPool", "BatchNormalization", "InstanceNormalization", "GroupNormalization",
+    "LayerNormalization", "LRN", "Relu", "LeakyRelu", "PRelu", "Sigmoid", "Tanh",
+    "HardSigmoid", "HardSwish", "Elu", "Selu", "Softplus", "Softsign", "Gelu", "Erf",
+    "Clip", "Gemm", "MatMul", "Einsum", "Add", "Sub", "Mul", "Div", "Pow", "Sqrt",
+    "Exp", "Log", "Abs", "Neg", "Floor", "Ceil", "Round", "Reciprocal", "Sign",
+    "Max", "Min", "Sum", "Mean", "Mod", "CumSum", "Equal", "Greater", "GreaterOrEqual",
+    "Less", "LessOrEqual", "And", "Or", "Not", "Xor", "Reshape", "Squeeze", "Unsqueeze",
+    "Transpose", "Flatten", "Expand", "Tile", "Pad", "Concat", "Split", "Slice",
+    "DepthToSpace", "SpaceToDepth", "Identity", "Constant", "ConstantOfShape", "Cast",
+    "CastLike", "Resize", "Upsample", "Where", "Range", "Compress", "Gather",
+    "GatherElements", "GatherND", "ScatterElements", "ScatterND", "Shape", "Size",
+    "NonZero", "TopK", "ArgMax", "ArgMin", "OneHot", "ReduceMax", "ReduceMin",
+    "ReduceMean", "ReduceSum", "ReduceProd", "Softmax", "LogSoftmax", "Dropout",
     "LSTM", "GRU", "RNN",
 }
 
-# 需经 :mod:`xpu_converter.rewrite` 改写后才能被昆仑 XPU 消费的算子
-REWRITE_OPS: Dict[str, str] = {
+FALLBACK_REWRITE_OPS: Dict[str, str] = {
     "Silu": "silu",
     "Mish": "mish",
     "Upsample": "resize",
     "NonMaxSuppression": "nms",
 }
 
+# 向后兼容别名(旧代码/测试引用过这两个名字)
+NATIVE_OPS: Set[str] = FALLBACK_NATIVE_OPS
+REWRITE_OPS: Dict[str, str] = FALLBACK_REWRITE_OPS
+
+
+def load_capability_set(hardware: str = "kunlun") -> OperatorCapabilitySet:
+    """读取硬件算子能力表; 文件缺失时回退到内置基线表。"""
+    path = hardware_capabilities_path(hardware)
+    if path.is_file():
+        return OperatorCapabilitySet.from_yaml(path)
+    return OperatorCapabilitySet(
+        operators={name: OperatorCapability(name) for name in FALLBACK_NATIVE_OPS},
+        rewrite_ops=FALLBACK_REWRITE_OPS,
+        domains=DEFAULT_DOMAINS,
+    )
+
 
 class KunlunOperatorRegistry:
-    """昆仑芯算子注册表。"""
+    """昆仑芯算子注册表(基于 OperatorCapabilitySet)。"""
 
     def __init__(
         self,
-        native_ops: Optional[Iterable[str]] = None,
+        capability_set: Optional[OperatorCapabilitySet] = None,
+        operators: Optional[Iterable[str]] = None,
         rewrite_ops: Optional[Dict[str, str]] = None,
         domains: Optional[Iterable[str]] = None,
     ) -> None:
-        self.native_ops: Set[str] = set(native_ops if native_ops is not None else NATIVE_OPS)
-        self.rewrite_ops: Dict[str, str] = dict(rewrite_ops if rewrite_ops is not None else REWRITE_OPS)
-        self.domains: Set[str] = set(domains if domains is not None else DEFAULT_DOMAINS)
+        caps = capability_set or OperatorCapabilitySet(
+            operators={name: OperatorCapability(name) for name in FALLBACK_NATIVE_OPS},
+            rewrite_ops=FALLBACK_REWRITE_OPS,
+            domains=DEFAULT_DOMAINS,
+        )
+        if operators or rewrite_ops:
+            caps = caps.with_extra(operators, rewrite_ops)
+        self.capabilities = caps
+        if domains:
+            self.capabilities.domains = set(domains)
+
+    # ---- 兼容属性 ----
+    @property
+    def native_ops(self) -> Set[str]:
+        return set(self.capabilities.operators)
+
+    @property
+    def rewrite_ops(self) -> Dict[str, str]:
+        return dict(self.capabilities.rewrite_ops)
 
     # ---- 注册 ----
     def with_extra(self, native_ops: Optional[Iterable[str]] = None,
                    rewrite_ops: Optional[Dict[str, str]] = None) -> "KunlunOperatorRegistry":
-        """返回注入增量后的新注册表(不修改自身)。"""
-        merged_native = set(self.native_ops)
-        merged_native.update(native_ops or [])
-        merged_rewrite = dict(self.rewrite_ops)
-        merged_rewrite.update(rewrite_ops or {})
-        return KunlunOperatorRegistry(merged_native, merged_rewrite, self.domains)
+        return KunlunOperatorRegistry(self.capabilities.with_extra(native_ops, rewrite_ops))
 
     def register(self, op_type: str) -> None:
-        self.native_ops.add(op_type)
+        self.capabilities.operators.setdefault(op_type, OperatorCapability(op_type))
 
     # ---- 分类 ----
-    def classify(self, op_type: str, domain: str = "") -> str:
+    def classify(self, op_type: str, domain: str = "", dtype: Optional[str] = None,
+                 attributes: Optional[Dict[str, Any]] = None,
+                 opset: Optional[int] = None) -> str:
         """返回 ``supported`` / ``rewritten`` / ``unsupported``。"""
-        if domain and domain not in self.domains:
-            return OperatorAnalysisResult.UNSUPPORTED
-        if op_type in self.rewrite_ops:
-            return OperatorAnalysisResult.REWRITTEN
-        if op_type in self.native_ops:
-            return OperatorAnalysisResult.SUPPORTED
-        return OperatorAnalysisResult.UNSUPPORTED
+        status, _reason = self.capabilities.classify(
+            op_type, domain, dtype=dtype, attributes=attributes, opset=opset
+        )
+        return status
+
+    def classify_with_reason(self, op_type: str, domain: str = "", dtype: Optional[str] = None,
+                             attributes: Optional[Dict[str, Any]] = None,
+                             opset: Optional[int] = None):
+        return self.capabilities.classify(
+            op_type, domain, dtype=dtype, attributes=attributes, opset=opset
+        )
 
     # ---- 分析 ----
-    def analyze(self, graph) -> OperatorAnalysis:
+    def analyze(self, graph, precision: str = "fp32") -> OperatorAnalysis:
         """统计图中算子的支持情况, ``graph`` 可为 IR Graph 或原始 ModelProto。"""
-        result = OperatorAnalysis()
-        for op_type, domain in self._iter_ops(graph):
-            result.op_counts[op_type] = result.op_counts.get(op_type, 0) + 1
-            kind = self.classify(op_type, domain)
-            if kind == OperatorAnalysisResult.SUPPORTED:
-                result.supported += 1
-            elif kind == OperatorAnalysisResult.REWRITTEN:
-                result.rewritten += 1
-            else:
-                result.unsupported += 1
-                if op_type not in result.unsupported_ops:
-                    result.unsupported_ops.append(op_type)
-                if domain and domain not in self.domains and domain not in result.domain_ops:
-                    result.domain_ops.append(domain)
+        from xpu_converter.capability.matrix import build_report
+
+        report = build_report(graph, self.capabilities, precision=precision)
+        result = OperatorAnalysis(
+            supported=report.supported,
+            rewritten=report.rewritten,
+            unsupported=report.unsupported,
+            op_counts=dict(report.op_counts),
+            unsupported_ops=list(report.unsupported_ops),
+            reasons=list(report.reasons),
+        )
         for op_type in result.op_counts:
-            if op_type in self.rewrite_ops:
-                result.rewrite_ops[op_type] = self.rewrite_ops[op_type]
+            if op_type in self.capabilities.rewrite_ops:
+                result.rewrite_ops[op_type] = self.capabilities.rewrite_ops[op_type]
+        for op_type, domain in self._iter_ops(graph):
+            if domain and domain not in self.capabilities.domains and domain not in result.domain_ops:
+                result.domain_ops.append(domain)
         return result
 
     def describe(self) -> Dict[str, Any]:
         return {
-            "native_op_count": len(self.native_ops),
-            "rewrite_ops": dict(self.rewrite_ops),
+            "native_op_count": len(self.capabilities.operators),
+            "rewrite_ops": dict(self.capabilities.rewrite_ops),
+            "capability": self.capabilities.describe(),
         }
 
     @staticmethod
@@ -140,13 +161,11 @@ class KunlunOperatorRegistry:
             yield getattr(node, "op_type", ""), getattr(node, "domain", "")
 
 
-def default_registry(target_chip: str = "auto") -> KunlunOperatorRegistry:
-    """按目标芯片返回算子注册表。
-
-    ``target_chip`` 目前只做占位: 在拿到昆仑 SDK 后, 可在此按型号裁剪支持表,
-    例如 R200 与 R300 对 ``Resize`` 的插值模式支持范围不同。
-    """
-    return KunlunOperatorRegistry()
+def default_registry(target_chip: str = "auto", hardware: str = "kunlun") -> KunlunOperatorRegistry:
+    """按目标芯片返回算子注册表(ChatGPT 修改意见 §33 的 Capability Matrix 数据层)。"""
+    registry = KunlunOperatorRegistry(load_capability_set(hardware))
+    registry.capabilities.target_chip = target_chip
+    return registry
 
 
 def collect_unique_ops(graph) -> List[str]:

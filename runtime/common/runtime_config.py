@@ -6,7 +6,7 @@
 
     <RUNTIME_HOME>/config/runtime.yaml
     <RUNTIME_HOME>/config/confidence.json
-    <RUNTIME_HOME>/model/model.xpu
+    <RUNTIME_HOME>/model/<model.file>      # 由 runtime.yaml 指定(默认 model.xpu)
     <RUNTIME_HOME>/model/metadata.json
 """
 import json
@@ -92,6 +92,16 @@ def model_path(config: Dict[str, Any] = None) -> str:
     root = Path(config.get("_home") or runtime_home())
     filename = str((config.get("model") or {}).get("file") or DEFAULT_MODEL_FILENAME)
     return str(root / MODEL_DIR / filename)
+
+
+def model_params_path(config: Dict[str, Any] = None) -> str:
+    """Paddle 静态图的参数文件(``.pdiparams``)。
+
+    与 program 文件同名同目录; 不存在时返回空串(表示单文件产物)。
+    """
+    program = Path(model_path(config))
+    candidate = program.with_suffix(".pdiparams")
+    return str(candidate) if candidate.is_file() else ""
 
 
 def metadata_path(config: Dict[str, Any] = None) -> str:

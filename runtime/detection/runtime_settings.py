@@ -29,6 +29,9 @@ CONF_THRES = float(os.environ.get("CONF_THRES") or _POST.get("conf_thres") or 0.
 IOU_THRES = float(os.environ.get("IOU_THRES") or _POST.get("iou_thres") or 0.45)
 MAX_DET = int(_POST.get("max_det") or 300)
 OUTPUT_LAYOUT = str(_POST.get("output_layout") or "auto")
+# 输出契约: 由转换器对真实 ONNX 探测后写入 runtime.yaml 的 output 段。
+# 缺失时解码器会显式报错, 不再用 shape 启发式猜测(ChatGPT 修改意见 §16)。
+OUTPUT_CONTRACT = dict(CONFIG.get("output") or _POST.get("output") or {})
 
 INPUT_SHAPE = [int(item) for item in (_INPUT.get("shape") or [1, 3, 640, 640])]
 INPUT_LAYOUT = str(_INPUT.get("layout") or "NCHW")

@@ -206,6 +206,22 @@ def infer_shapes(graph: Graph) -> bool:
     return True
 
 
+def check_model(model) -> Optional[str]:
+    """用 ONNX checker 校验 ModelProto。
+
+    合法返回 ``None``; 不合法或 onnx 缺失返回错误摘要字符串(ChatGPT 修改意见
+    §35/§36: 每个 Pass/Rewrite 落地后都要过一遍图合法性检查, 失败则回滚)。
+    """
+    if model is None or not available():
+        return None
+    onnx = require_onnx()
+    try:
+        onnx.checker.check_model(model)
+        return None
+    except Exception as err:  # noqa: BLE001 - checker 异常类型不稳定, 一律视为不合法
+        return "{}: {}".format(type(err).__name__, err)
+
+
 # ------------------------------------------------------------ 张量取值工具
 def tensor_to_numpy(tensor_proto):
     """ONNX TensorProto -> numpy 数组。"""

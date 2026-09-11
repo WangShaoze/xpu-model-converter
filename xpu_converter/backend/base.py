@@ -10,6 +10,7 @@
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -32,6 +33,8 @@ class OperatorAnalysis:
     rewrite_ops: Dict[str, str] = field(default_factory=dict)
     unsupported_ops: List[str] = field(default_factory=list)
     domain_ops: List[str] = field(default_factory=list)
+    # 每个不支持算子的具体原因(如 Resize 的 mode/dtype 不满足), 便于定位问题
+    reasons: List[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -57,6 +60,7 @@ class OperatorAnalysis:
             "rewrite_ops": dict(self.rewrite_ops),
             "unsupported_ops": list(self.unsupported_ops),
             "domain_ops": list(self.domain_ops),
+            "reasons": list(self.reasons),
         }
 
 
@@ -64,8 +68,9 @@ class OperatorAnalysis:
 class BackendArtifact:
     """编译产物。
 
-    ``model.xpu`` 是交付包内约定的编译模型文件名(建设目标 §6), 其余字段用于
-    回写 ``manifest.json`` / ``model.yaml`` / ``metadata.json``。
+    产物可能是**单个文件**(如 ``model.xpu`` / stub 的 ``model.onnx``), 也可能是
+    **一组文件**(Paddle 静态图为 ``model.pdmodel`` + ``model.pdiparams``)。
+    因此除 ``model_path``(主文件)外, 增加 ``files`` 记录全部交付文件。
     """
 
     model_path: str
@@ -75,15 +80,29 @@ class BackendArtifact:
     artifact_format: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    files: List[str] = field(default_factory=list)
 
     @property
     def degraded(self) -> bool:
         """是否为降级产物(SDK 缺失时生成的占位件)。"""
         return self.artifact_format in ("stub", "placeholder")
 
+    @property
+    def artifact_files(self) -> List[str]:
+        """产物全部文件(主文件在前); ``files`` 为空时回退到 ``model_path``。"""
+        if self.files:
+            return list(self.files)
+        return [self.model_path] if self.model_path else []
+
+    @property
+    def filenames(self) -> List[str]:
+        return [Path(path).name for path in self.artifact_files]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "model_path": self.model_path,
+            "model_file": Path(self.model_path).name if self.model_path else "",
+            "files": self.artifact_files,
             "precision": self.precision,
             "sdk_adapter": self.sdk_adapter,
             "target_chip": self.target_chip,
@@ -137,7 +156,7 @@ class BaseBackend(ABC):
         """返回后端与 SDK 可用性描述, 供 ``inspect`` / ``analyze`` 输出。"""
 
     @abstractmethod
-    def analyze(self, graph) -> OperatorAnalysis:
+    def analyze(self, graph, precision: Optional[str] = None) -> OperatorAnalysis:
         """分析图内算子在目标后端上的支持情况。"""
 
     @abstractmethod

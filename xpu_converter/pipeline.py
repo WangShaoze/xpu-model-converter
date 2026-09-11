@@ -15,8 +15,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from xpu_converter.backend.base import BackendArtifact, OperatorAnalysis
+from xpu_converter.capability.hardware import HardwareCapability, probe_kunlun
+from xpu_converter.capability.matrix import CapabilityReport, build_report
 from xpu_converter.config import BuildManifest, HardwareConfig, ModelConfig
-from xpu_converter.errors import XpuConverterError
+from xpu_converter.environment import source_fingerprint
+from xpu_converter.errors import NotSupportedError, XpuConverterError
 from xpu_converter.exporter.docker_exporter import DockerExporter
 from xpu_converter.frontend.base import BaseModelAdapter, FrontendModel
 from xpu_converter.ir import onnx as onnx_ir
@@ -61,7 +64,9 @@ class ConversionResult:
     package_zip: str = ""
     package_dir: str = ""
     frontend_model: Optional[FrontendModel] = None
+    source_fingerprint: Dict[str, Any] = field(default_factory=dict)
     operator_analysis: Optional[OperatorAnalysis] = None
+    capability: Optional[CapabilityReport] = None
     optimization_report: Optional[OptimizationReport] = None
     rewrite_result: Optional[RewriteResult] = None
     artifact: Optional[BackendArtifact] = None
@@ -89,7 +94,9 @@ class ConversionResult:
             "package_zip": self.package_zip,
             "package_dir": self.package_dir,
             "degraded": self.degraded,
+            "source_fingerprint": dict(self.source_fingerprint),
             "operator_analysis": self.operator_analysis.to_dict() if self.operator_analysis else {},
+            "capability": self.capability.to_dict() if self.capability else {},
             "optimization": self.optimization_report.to_dict() if self.optimization_report else {},
             "rewrite": self.rewrite_result.to_dict() if self.rewrite_result else {},
             "artifact": self.artifact.to_dict() if self.artifact else {},
@@ -121,7 +128,8 @@ class ConversionPipeline:
         validation_enabled: bool = True,
         benchmark_iterations: int = 50,
         export_docker: bool = True,
-        allow_degraded: bool = True,
+        allow_degraded: bool = False,
+        allow_degraded_package: bool = False,
         optimizer_level_override: Optional[int] = None,
         reporter: Optional[StepReporter] = None,
     ) -> None:
@@ -142,6 +150,7 @@ class ConversionPipeline:
         self.benchmark_iterations = int(benchmark_iterations)
         self.export_docker = bool(export_docker)
         self.allow_degraded = bool(allow_degraded)
+        self.allow_degraded_package = bool(allow_degraded_package)
         self.reporter = reporter or StepReporter(total=len(STEP_TITLES))
         self.log = logger
 
@@ -162,7 +171,10 @@ class ConversionPipeline:
         self._run_step(4, self._step_analyze_operators)
         self._run_step(5, self._step_optimize)
         self._run_step(6, self._step_compile)
-        self._run_step(7, self._step_validate)
+        if self.validation_enabled:
+            self._run_step(7, self._step_validate)
+        else:
+            self._skip_step(7, "已按参数跳过(validation_enabled=False)")
         self._run_step(8, self._step_benchmark)
         self._run_step(9, self._step_package)
         return self.result
@@ -183,6 +195,15 @@ class ConversionPipeline:
         self.reporter.step(title, ok=True, detail=detail or "")
         self.result.steps.append({"index": index + 1, "title": title, "ok": True, "detail": detail or ""})
 
+    def _skip_step(self, index: int, reason: str) -> None:
+        """按参数跳过某一步: 明确标记 SKIPPED, 不伪装成 OK。"""
+        title = STEP_TITLES[index]
+        self.reporter.step(title, ok=True, detail=reason, skipped=True)
+        self.result.steps.append({
+            "index": index + 1, "title": title, "ok": True,
+            "skipped": True, "detail": reason,
+        })
+
     # ------------------------------------------------------------------ 步骤 01
     def _step_inspect(self) -> str:
         self.adapter = self._create_adapter()
@@ -191,6 +212,14 @@ class ConversionPipeline:
         self.result.framework = frontend.framework
         self.result.task = frontend.task
         self.result.input_shape = list(frontend.input_shape)
+        # 环境指纹(ChatGPT 修改意见 §13): 记录框架 / 上游库 / 解释器版本与来源权重
+        # 并附加源模型 SHA256(§31), 供交付后核对"是不是客户给的那个 checkpoint"
+        self.result.source_fingerprint = source_fingerprint(
+            frontend.framework,
+            checkpoint=os.path.basename(self.model_path),
+            model_path=self.model_path,
+        )
+        frontend.extra["environment"] = dict(self.result.source_fingerprint)
         return "{} / {} / {} 类, 输入 {}".format(
             frontend.framework, frontend.model_type, frontend.num_classes, frontend.input_shape
         )
@@ -237,7 +266,10 @@ class ConversionPipeline:
     # ------------------------------------------------------------------ 步骤 05
     def _step_analyze_operators(self) -> str:
         self.backend = self._create_backend()
-        analysis = self.backend.analyze(self.graph)
+        self.hardware_capability = probe_kunlun(
+            self.hardware_config.target_chip, self.hardware_config.device
+        )
+        analysis = self.backend.analyze(self.graph, precision=self.hardware_config.precision)
         self.result.operator_analysis = analysis
         detail = analysis.summary()
         if analysis.unsupported_ops:
@@ -256,6 +288,7 @@ class ConversionPipeline:
             overrides["sdk_adapter"] = self.sdk_adapter
         if self.optimization_level is not None:
             overrides["optimization_level"] = self.optimization_level
+        overrides["allow_degraded"] = self.allow_degraded
         self.hardware_config: HardwareConfig = resolve_hardware_config(self.hardware, overrides)
         self.result.precision = self.hardware_config.precision
         return create_backend(self.hardware, self.hardware_config)
@@ -285,8 +318,39 @@ class ConversionPipeline:
         return detail
 
     # ------------------------------------------------------------------ 步骤 07
+    def _final_capability_check(self) -> CapabilityReport:
+        """编译前的硬门禁(ChatGPT 修改意见 §10/§32/§39)。
+
+        对**优化 + 改写后的最终图**再跑一次 Capability Matrix, 带 dtype / 属性 /
+        opset 约束; 只要有一个 UNSUPPORTED 就拒绝进入编译, 避免"白编译后才发现
+        跑不起来"。
+        """
+        registry = getattr(self.backend, "registry", None)
+        capabilities = getattr(registry, "capabilities", None)
+        if capabilities is None:
+            from xpu_converter.backend.kunlun.operator_registry import default_registry as _operator_registry
+
+            capabilities = _operator_registry(
+                self.hardware_config.target_chip, self.hardware
+            ).capabilities
+        return build_report(
+            self.graph,
+            capabilities,
+            precision=self.hardware_config.precision,
+            hardware=self.hardware_capability,
+            opset=self.graph.opset,
+        )
+
     def _step_compile(self) -> str:
         from xpu_converter.backend.kunlun.graph_builder import XpuGraphBuilder
+
+        report = self._final_capability_check()
+        self.result.capability = report
+        if not report.ok:
+            detail = "; ".join(report.reasons) or report.summary()
+            raise NotSupportedError(
+                "Final Operator Check 未通过, 已阻止编译: {}".format(detail)
+            )
 
         xpu_dir = self.output_dir / "xpu"
         xpu_dir.mkdir(parents=True, exist_ok=True)
@@ -318,7 +382,11 @@ class ConversionPipeline:
         from xpu_converter.backend.kunlun.runtime import OnnxRuntimeSession
 
         artifact = self.result.artifact
-        reference = OnnxRuntimeSession(self.result.onnx_path, device="cpu")
+        # 三层精度校验(ChatGPT 修改意见 §19):
+        #   Level 1 Graph   : 原 ONNX vs 优化 ONNX
+        #   Level 2 Backend : 优化 ONNX(CPU) vs 目标后端
+        graph_reference = OnnxRuntimeSession(self.result.onnx_path, device="cpu")
+        reference = OnnxRuntimeSession(self.result.optimized_onnx_path, device="cpu")
         target = self.backend.create_runtime(artifact)
 
         input_spec = {}
@@ -333,10 +401,12 @@ class ConversionPipeline:
 
         report = AccuracyValidator(fail_on_mismatch=False).validate(
             reference, target, samples,
-            onnx_session=OnnxRuntimeSession(self.result.optimized_onnx_path, device="cpu"),
+            graph_reference=graph_reference,
             synthetic=synthetic, notes=notes,
+            num_classes=int(self.adapter.config.num_classes or 0) or None,
         )
         self.result.accuracy = report
+        graph_reference.close()
         reference.close()
         target.close()
         return "{} | {}".format(report.summary(), "通过" if report.passed else "未通过")
@@ -345,8 +415,20 @@ class ConversionPipeline:
     def _step_benchmark(self) -> str:
         artifact = self.result.artifact
         session = self.backend.create_runtime(artifact)
+        # 用图输入规格生成确定性样本, 避免后端张量重命名/形状推导差异导致空输入
+        input_spec = {tensor.name: list(tensor.shape) for tensor in self.graph.inputs}
+        samples, _, _ = load_dataset_inputs(None, input_spec, max_samples=1)
         runner = BenchmarkRunner(iterations=self.benchmark_iterations, warmup=max(1, self.benchmark_iterations // 10))
-        result = runner.run(session, device=self.hardware_config.device)
+        result = runner.run(
+            session,
+            sample=samples[0] if samples else None,
+            device=self.hardware_config.device,
+            # 硬件指纹(§23): 让性能数字带上芯片/SDK 版本, 否则无法与规格书对齐
+            hardware=self.hardware_capability,
+            model=self.adapter.config.model_type,
+            input_shape=self.result.input_shape,
+            precision=self.hardware_config.precision,
+        )
         session.close()
         self.result.benchmark = result
         for note in result.notes:
@@ -365,6 +447,7 @@ class ConversionPipeline:
             model_config=self.adapter.config,
             hardware_config=self.hardware_config,
             runtime=self.runtime,
+            allow_degraded=self.allow_degraded_package,
             # 交付包 packages/ 内的依赖轮子来源由 DockerExporter 从 hardware_config.docker 读取
         )
         # 交付包目录与 ZIP 直接落在输出目录顶层, 与建设目标 §13 的 dist/ 结构一致
@@ -376,6 +459,9 @@ class ConversionPipeline:
             onnx_path=self.result.optimized_onnx_path,
             accuracy=self.result.accuracy,
             benchmark=self.result.benchmark,
+            # artifact.json 需要优化/硬件信息(§29/§30)
+            optimization_report=self.result.optimization_report,
+            hardware_capability=self.hardware_capability,
         )
         self.result.package_zip = zip_path
         self.result.package_dir = str(package_root / manifest.package_name)
@@ -383,15 +469,18 @@ class ConversionPipeline:
 
     def _build_manifest(self) -> BuildManifest:
         name = self.package_name or self.adapter.config.model_type
+        optimization: Dict[str, Any] = {"level": int(self.hardware_config.optimization_level)}
+        if self.result.optimization_report is not None:
+            optimization.update(self.result.optimization_report.to_dict())
         return BuildManifest.from_dict({
             "name": name,
             "version": self.version,
             "task": self.result.task,
-            "source": {
+            "source": dict({
                 "framework": self.result.framework,
                 "model_type": self.adapter.config.model_type,
                 "file": os.path.basename(self.model_path),
-            },
+            }, **self.result.source_fingerprint),
             "input": {
                 "shape": list(self.result.input_shape),
                 "dtype": self.adapter.config.input_dtype,
@@ -401,6 +490,7 @@ class ConversionPipeline:
                 "precision": self.hardware_config.precision,
                 "batch_size": 1,
             },
+            "optimization": optimization,
             "runtime": {"type": self.runtime, "port": int(self.hardware_config.runtime.get("port", 58025))},
             "validation": {
                 "enabled": self.validation_enabled,

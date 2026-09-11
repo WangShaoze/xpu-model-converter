@@ -5,12 +5,14 @@ import unittest
 import numpy as np
 
 from tests import _models
+from tests import requires_onnx
 from xpu_converter.ir import onnx as onnx_ir
 from xpu_converter.optimizer.constant_fold import ConstantFoldPass
 from xpu_converter.optimizer.fusion import ConvBNFusionPass
 from xpu_converter.optimizer.pipeline import OptimizationPipeline
 
 
+@requires_onnx
 class TestConstantFold(unittest.TestCase):
     def test_folds_shape_gather_chain(self):
         model = _models.build_shape_fold()
@@ -38,6 +40,7 @@ class TestConstantFold(unittest.TestCase):
         self.assertEqual(len(graph.find_nodes("Cast")), 1)
 
 
+@requires_onnx
 class TestConvBNFusion(unittest.TestCase):
     def test_fusion_is_numerically_equivalent(self):
         model = _models.build_conv_bn_relu()
@@ -66,6 +69,7 @@ class TestConvBNFusion(unittest.TestCase):
         self.assertEqual(result.details["fused"], 0)
 
 
+@requires_onnx
 class TestPipeline(unittest.TestCase):
     def test_default_pipeline_runs_all_passes(self):
         graph = onnx_ir.from_model(_models.build_conv_bn_relu())

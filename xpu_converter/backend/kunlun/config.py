@@ -14,6 +14,8 @@ from xpu_converter.errors import ConfigError
 # 可选 SDK 适配器: auto 按优先级自动探测, stub 为无 SDK 时的离线占位
 SDK_ADAPTERS = ("auto", "paddle", "xpuctl", "stub")
 PRECISIONS = ("fp32", "fp16")
+# 已知但尚未实现的精度: 显式拒绝, 避免把未支持的量化伪装成可交付能力(§55 INT8 属于 P2)
+PLANNED_PRECISIONS = ("int8", "int4")
 
 
 @dataclass
@@ -42,6 +44,12 @@ class KunlunConfig:
                 "不支持的 sdk_adapter: {!r}, 可选 {}".format(self.sdk_adapter, ", ".join(SDK_ADAPTERS))
             )
         if self.precision not in PRECISIONS:
+            if self.precision in PLANNED_PRECISIONS:
+                raise ConfigError(
+                    "精度 {!r} 尚未实现(属于 P2 规划), 当前仅支持 {}".format(
+                        self.precision, ", ".join(PRECISIONS)
+                    )
+                )
             raise ConfigError(
                 "不支持的 precision: {!r}, 可选 {}".format(self.precision, ", ".join(PRECISIONS))
             )

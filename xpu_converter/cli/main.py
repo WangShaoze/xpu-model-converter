@@ -20,7 +20,12 @@ from typing import List, Optional
 from xpu_converter.cli.common import add_hardware_args, add_model_args
 from xpu_converter.cli.compile import cmd_compile
 from xpu_converter.cli.convert import cmd_build, cmd_convert, cmd_export_onnx
-from xpu_converter.cli.inspect import cmd_analyze, cmd_inspect
+from xpu_converter.cli.inspect import (
+    cmd_analyze,
+    cmd_inspect,
+    cmd_list_capabilities,
+    cmd_list_models,
+)
 from xpu_converter.cli.package import cmd_package
 from xpu_converter.cli.validate import cmd_validate
 from xpu_converter.errors import XpuConverterError
@@ -115,6 +120,20 @@ def build_parser() -> argparse.ArgumentParser:
     package_parser.add_argument("--dev-package", dest="dev_package", action="store_true",
                                 help="允许把 degraded 占位产物打入 Docker 交付包(仅供开发联调, 默认禁止)")
     package_parser.set_defaults(handler=cmd_package)
+
+    # ------------------------------------------------------------ list-models
+    models_parser = subparsers.add_parser("list-models", help="列出模型的生命周期状态(stable/experimental/planned)")
+    models_parser.add_argument("--status", default=None,
+                               choices=("stable", "experimental", "deprecated", "planned"),
+                               help="只显示指定状态的模型")
+    models_parser.add_argument("--json", default=None, help="把列表写到指定 JSON 文件")
+    models_parser.set_defaults(handler=cmd_list_models)
+
+    # ------------------------------------------------------ list-capabilities
+    caps_parser = subparsers.add_parser("list-capabilities", help="打印算子能力表与目标硬件能力指纹")
+    add_hardware_args(caps_parser, with_precision=False)
+    caps_parser.add_argument("--json", default=None, help="把能力表写到指定 JSON 文件")
+    caps_parser.set_defaults(handler=cmd_list_capabilities)
 
     return parser
 

@@ -47,7 +47,8 @@ class CliTest(unittest.TestCase):
         code, output = run_cli("--help")
         self.assertEqual(code, 0)
         for command in ("inspect", "convert", "export-onnx", "analyze",
-                        "compile", "validate", "package", "build"):
+                        "compile", "validate", "package", "build",
+                        "list-models", "list-capabilities"):
             self.assertIn(command, output)
 
     def test_analyze_reports_operators(self):
@@ -169,6 +170,50 @@ class CliTest(unittest.TestCase):
         model_registry._ADAPTERS.clear()
         model_registry._ADAPTERS.update(self._adapters_backup)
         model_registry._LOADED = self._loaded_backup
+
+
+class CatalogCliTest(unittest.TestCase):
+    """``list-models`` / ``list-capabilities`` 与生命周期/精度门禁(P2 §50/§55)。
+
+    这些用例不依赖 onnx, 因此不受 :data:`requires_onnx` 限制。
+    """
+
+    def test_list_models_shows_lifecycle(self):
+        code, output = run_cli("list-models")
+        self.assertEqual(code, 0, output)
+        self.assertIn("yolov10", output)
+        self.assertIn("STABLE", output)
+        # V1 只承诺 yolov10, 其余必须显式标注为实验/规划(§49/§51)
+        self.assertIn("EXPERIMENTAL", output)
+        self.assertIn("PLANNED", output)
+
+    def test_list_models_status_filter(self):
+        code, output = run_cli("list-models", "--status", "stable")
+        self.assertEqual(code, 0, output)
+        self.assertIn("yolov10", output)
+        self.assertNotIn("yolov8", output)
+
+    def test_list_capabilities_reports_operator_and_hardware(self):
+        code, output = run_cli("list-capabilities", "--hardware", "kunlun")
+        self.assertEqual(code, 0, output)
+        self.assertIn("算子能力表", output)
+        self.assertIn("硬件能力", output)
+        self.assertIn("支持精度", output)
+
+    def test_planned_model_is_rejected(self):
+        from xpu_converter.errors import NotSupportedError
+        from xpu_converter.registry import model_registry
+
+        with self.assertRaises(NotSupportedError):
+            model_registry.get_adapter_class("ppocr")
+
+    def test_int8_precision_is_explicitly_rejected(self):
+        from xpu_converter.backend.kunlun.config import KunlunConfig
+        from xpu_converter.errors import ConfigError
+
+        with self.assertRaises(ConfigError) as ctx:
+            KunlunConfig(precision="int8")
+        self.assertIn("int8", str(ctx.exception))
 
 
 if __name__ == "__main__":

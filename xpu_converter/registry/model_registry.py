@@ -6,6 +6,7 @@
 配置文件 (``configs/models/<model_type>.yaml``)。
 """
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
@@ -13,6 +14,86 @@ from xpu_converter.config import ModelConfig, deep_merge, load_yaml
 from xpu_converter.errors import ConfigError, NotSupportedError
 from xpu_converter.frontend.base import BaseModelAdapter
 from xpu_converter.paths import model_config_path
+
+# ---------------------------------------------------------------- 生命周期
+#: 已随 V1 交付验证、可对外宣称支持
+STATUS_STABLE = "stable"
+#: 代码可跑但未经真机/真数据验证, 不承诺
+STATUS_EXPERIMENTAL = "experimental"
+#: 保留兼容, 不再演进
+STATUS_DEPRECATED = "deprecated"
+#: 规划中, 当前不支持(调用会明确报错, 不做静默降级)
+STATUS_PLANNED = "planned"
+
+STATUS_ORDER = (STATUS_STABLE, STATUS_EXPERIMENTAL, STATUS_DEPRECATED, STATUS_PLANNED)
+
+#: V1 锁定范围(ChatGPT 修改意见 §51): 只有 YOLOv10 是 stable, 其余一律不算承诺
+V1_STABLE_MODELS = ("yolov10",)
+
+
+@dataclass(frozen=True)
+class ModelSupport:
+    """模型的生命周期状态(ChatGPT 修改意见 §50)。
+
+    "代码里有 adapter" 不等于 "声称支持": 只有 ``status == stable`` 才是可对外
+    交付的模型, 其余需显式标注 experimental / planned, 避免维护失控(§49/§51)。
+    """
+
+    model_type: str
+    status: str = STATUS_EXPERIMENTAL
+    framework: str = "pytorch"
+    task: str = "detection"
+    min_framework_version: str = ""
+    notes: str = ""
+
+    @property
+    def is_deliverable(self) -> bool:
+        return self.status == STATUS_STABLE
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "model_type": self.model_type,
+            "status": self.status,
+            "framework": self.framework,
+            "task": self.task,
+            "min_framework_version": self.min_framework_version,
+            "notes": self.notes,
+        }
+
+
+#: 各模型的生命周期声明。新增模型必须在此登记状态, 否则默认 experimental。
+SUPPORT_TABLE: List[ModelSupport] = [
+    ModelSupport("yolov10", STATUS_STABLE, "pytorch", "detection", "ultralytics==8.1.*",
+                 "V1 唯一承诺交付的模型"),
+    ModelSupport("yolov8", STATUS_EXPERIMENTAL, "pytorch", "detection", "ultralytics>=8.0"),
+    ModelSupport("yolov9", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
+    ModelSupport("yolov11", STATUS_EXPERIMENTAL, "pytorch", "detection", "ultralytics>=8.3"),
+    ModelSupport("yolov5", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
+    ModelSupport("yolov12", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
+    ModelSupport("yolov26", STATUS_EXPERIMENTAL, "pytorch", "detection", ""),
+    ModelSupport("ppocr", STATUS_PLANNED, "paddle", "ocr", "",
+                 "Paddle/OCR 属于 P2, 当前不支持"),
+    ModelSupport("paddledetection", STATUS_PLANNED, "paddle", "detection", "",
+                 "Paddle 前端属于 P2, 当前不支持"),
+]
+
+
+def model_support(model_type: str) -> ModelSupport:
+    """查询模型生命周期声明; 未登记的模型按 experimental 处理。"""
+    key = str(model_type or "").strip().lower()
+    for item in SUPPORT_TABLE:
+        if item.model_type == key:
+            return item
+    return ModelSupport(key or "unknown")
+
+
+def supported_models(status: Optional[str] = None) -> List[ModelSupport]:
+    """按状态筛选模型; ``status`` 为空时返回全部。"""
+    if not status:
+        return list(SUPPORT_TABLE)
+    wanted = str(status).strip().lower()
+    return [item for item in SUPPORT_TABLE if item.status == wanted]
+
 
 # 文件名中的模型关键字 -> model_type(用于 --model-type 缺省时的自动识别)
 FILENAME_HINTS: List[tuple] = [
@@ -69,6 +150,14 @@ def get_adapter_class(model_type: str) -> Type[BaseModelAdapter]:
     if key not in _ADAPTERS:
         raise NotSupportedError(
             "不支持的模型类型: {!r}, 当前支持: {}".format(model_type, ", ".join(available_model_types()))
+        )
+    support = model_support(key)
+    if support.status == STATUS_PLANNED:
+        # 规划中的模型即便残留了适配器代码也明确拒绝, 不做"能跑就算支持"的静默承诺(§49/§51)
+        raise NotSupportedError(
+            "模型 {} 当前状态为 {}: {} (见 xpu-converter list-models)".format(
+                key, support.status, support.notes or "尚未实现"
+            )
         )
     return _ADAPTERS[key]
 

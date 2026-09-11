@@ -9,15 +9,25 @@ from xpu_converter.registry.backend_registry import (
     resolve_hardware_config,
 )
 from xpu_converter.registry.model_registry import (
+    STATUS_EXPERIMENTAL,
+    STATUS_PLANNED,
+    STATUS_STABLE,
+    ModelSupport,
     available_model_types,
     create_adapter,
     detect_model_type,
     get_adapter_class,
+    model_support,
     register_adapter,
     resolve_model_config,
+    supported_models,
 )
 
 __all__ = [
+    "STATUS_EXPERIMENTAL",
+    "STATUS_PLANNED",
+    "STATUS_STABLE",
+    "ModelSupport",
     "available_backends",
     "available_model_types",
     "create_adapter",
@@ -26,8 +36,10 @@ __all__ = [
     "get_adapter_class",
     "get_backend_class",
     "kunlun_config_from",
+    "model_support",
     "register_adapter",
     "register_backend",
     "resolve_hardware_config",
     "resolve_model_config",
+    "supported_models",
 ]

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""``xpu-converter inspect`` / ``xpu-converter analyze``(建设目标 §13)。"""
-from typing import Any, Dict
+"""``xpu-converter inspect`` / ``analyze`` / ``list-models`` / ``list-capabilities``。"""
+from pathlib import Path
+from typing import Any, Dict, List
 
 from xpu_converter.cli.common import (
     adapter_for,
@@ -12,7 +13,7 @@ from xpu_converter.cli.common import (
 )
 from xpu_converter.errors import ConfigError
 from xpu_converter.ir import onnx as onnx_ir
-from xpu_converter.paths import model_config_path
+from xpu_converter.paths import hardware_capabilities_path, model_config_path
 
 
 def cmd_inspect(args) -> int:
@@ -106,3 +107,96 @@ def cmd_analyze(args) -> int:
         }, args.json)
         print("已写出: {}".format(args.json))
     return 0 if analysis.ok else 1
+
+
+def cmd_list_models(args) -> int:
+    """``list-models``: 列出模型的生命周期状态(ChatGPT 修改意见 §50)。
+
+    "代码里有 adapter" 不等于 "承诺支持", 因此这里显式区分 stable / experimental
+    / planned, 避免把实验性模型当成已交付能力对外宣称(§49/§51)。
+    """
+    from xpu_converter.registry.model_registry import available_model_types, supported_models
+
+    try:
+        loaded = set(available_model_types())
+    except Exception:  # pragma: no cover - 依赖缺失时仍应能列出生命周期表
+        loaded = set()
+
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for item in supported_models():
+        seen.add(item.model_type)
+        rows.append({
+            "model_type": item.model_type,
+            "framework": item.framework,
+            "status": item.status.upper(),
+            "adapter": "yes" if item.model_type in loaded else "no",
+            "notes": item.notes,
+        })
+    for model_type in sorted(loaded - seen):
+        rows.append({"model_type": model_type, "framework": "-", "status": "EXPERIMENTAL",
+                     "adapter": "yes", "notes": "未在生命周期表登记"})
+
+    wanted = getattr(args, "status", None)
+    if wanted:
+        rows = [row for row in rows if row["status"].lower() == str(wanted).lower()]
+
+    _print_table(rows, ("model_type", "framework", "status", "adapter", "notes"))
+    if getattr(args, "json", None):
+        save_json({"models": rows}, args.json)
+        print("已写出: {}".format(args.json))
+    return 0
+
+
+def cmd_list_capabilities(args) -> int:
+    """``list-capabilities --hardware kunlun``: 打印算子能力表与硬件能力指纹。"""
+    from xpu_converter.capability import OperatorCapabilitySet, probe_kunlun
+
+    config = hardware_config_from(args)
+    cap_path = hardware_capabilities_path(config.name)
+    capability_set = (
+        OperatorCapabilitySet.from_yaml(cap_path)
+        if Path(cap_path).is_file() else OperatorCapabilitySet()
+    )
+    hardware = probe_kunlun(getattr(config, "target_chip", "auto"), getattr(config, "device", "auto"))
+
+    print_kv("算子能力表", {
+        "文件": str(cap_path) if Path(cap_path).is_file() else "(缺失, 使用空能力表)",
+        "版本": capability_set.version,
+        "目标芯片": capability_set.target_chip,
+        "算子数": len(capability_set.operators),
+        "需改写算子": capability_set.rewrite_ops,
+    })
+    print_kv("硬件能力", {
+        "后端": hardware.name,
+        "芯片": hardware.chip,
+        "SDK 版本": hardware.sdk_version,
+        "设备数": hardware.device_count,
+        "设备可用": hardware.device_available,
+        "支持精度": sorted(hardware.supported_precisions),
+        "支持 layout": sorted(hardware.layouts),
+        "动态 shape": hardware.dynamic_shape,
+        "paddle": hardware.paddle_version,
+    })
+    if hardware.notes:
+        print_kv("备注", {"提示": hardware.notes})
+    if getattr(args, "json", None):
+        save_json({
+            "operator_capability": capability_set.to_dict(),
+            "hardware": hardware.to_dict(),
+        }, args.json)
+        print("已写出: {}".format(args.json))
+    return 0
+
+
+def _print_table(rows: List[Dict[str, Any]], columns) -> None:
+    """等宽列打印(避免额外依赖)。"""
+    widths = {key: len(key) for key in columns}
+    for row in rows:
+        for key in columns:
+            widths[key] = max(widths[key], len(str(row.get(key, ""))))
+    header = "  ".join("{:<{w}}".format(key, w=widths[key]) for key in columns)
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        print("  ".join("{:<{w}}".format(str(row.get(key, "")), w=widths[key]) for key in columns))

@@ -2,7 +2,13 @@
 """性能基准测试(CLI 步骤 09)。
 
 只做端到端推理时延统计, 不含前后处理, 便于与芯片规格书对齐。
+
+P0-10(性能必须绑定硬件指纹): 每个 benchmark artifact 强制写入
+``chip/sdk_version/driver_version/firmware_version/model/precision/
+input_shape/batch/warmup/iterations``; 缺失芯片指纹(chip 为空)时结果
+判为 ``NOT_AVAILABLE`` —— 无法溯源到具体硬件的性能数字不可信, 不入库。
 """
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -18,8 +24,8 @@ from xpu_converter.backend.base import BaseRuntimeSession
 class BenchmarkResult:
     """单次基准测试结果。
 
-    正式 benchmark 必须带硬件指纹(ChatGPT 修改意见 §23): 同样的模型在不同芯片 /
-    SDK / 驱动上的时延没有可比性, 所以把环境信息与数字一起落盘。
+    正式 benchmark 必须带硬件指纹(ChatGPT 修改意见 §23/P0-10): 同样的模型在
+    不同芯片 / SDK / 驱动上的时延没有可比性, 所以把环境信息与数字一起落盘。
     """
 
     backend: str = ""
@@ -33,6 +39,7 @@ class BenchmarkResult:
     # 被测模型信息(§23)
     model: str = ""
     input_shape: List[int] = field(default_factory=list)
+    batch: int = 0
     precision: str = ""
     iterations: int = 0
     warmup: int = 0
@@ -42,6 +49,20 @@ class BenchmarkResult:
     # 只有在真实目标硬件上跑出来的数据才 available=True; 仿真/占位后端一律 NOT_AVAILABLE
     available: bool = True
     status: str = "OK"
+    # 由 chip/sdk/driver/firmware/device 归一化生成的指纹串(用于跨结果对账)
+    hardware_fingerprint: str = ""
+
+    @property
+    def credible(self) -> bool:
+        """可信性: 可用且能溯源到具体芯片(性能必须绑定硬件指纹, P0-10)。"""
+        return self.available and bool(self.chip)
+
+    def compute_fingerprint(self) -> str:
+        key = "|".join([
+            self.chip or "", self.sdk_version or "", self.driver_version or "",
+            self.firmware_version or "", self.device or "", str(self.device_id or 0),
+        ])
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -52,16 +73,19 @@ class BenchmarkResult:
             "sdk_version": self.sdk_version,
             "driver_version": self.driver_version,
             "firmware_version": self.firmware_version,
+            "hardware_fingerprint": self.hardware_fingerprint or self.compute_fingerprint(),
             "model": self.model,
             "input_shape": list(self.input_shape),
+            "batch": int(self.batch),
             "precision": self.precision,
             "warmup": self.warmup,
             "iterations": self.iterations,
             "latency_ms": dict(self.latency_ms),
             "throughput_fps": self.throughput_fps,
-            "notes": list(self.notes),
             "available": self.available,
+            "credible": self.credible,
             "status": self.status,
+            "notes": list(self.notes),
         }
 
     def summary(self) -> str:
@@ -123,6 +147,19 @@ class BenchmarkRunner:
             return result
 
         feeds = self._build_feeds(session, sample)
+        self._fill_batch(result, sample, feeds)
+        result.hardware_fingerprint = result.compute_fingerprint()
+
+        # P0-10 性能必须绑定硬件指纹: 缺芯片指纹(chip 为空)→ 无法溯源, 判不可用
+        if not result.chip:
+            result.available = False
+            result.status = "NOT_AVAILABLE"
+            result.notes.append(
+                "缺少芯片指纹(chip 为空): 性能无法溯源到具体硬件, 不入库; "
+                "请通过 hardware 提供 chip/sdk_version/driver_version/firmware_version"
+            )
+            return result
+
         for _ in range(self.warmup):
             session.run(feeds)
 
@@ -169,6 +206,24 @@ class BenchmarkRunner:
             static = [1 if (d is None or int(d) <= 0) else int(d) for d in (shape or [1])]
             feeds[name] = np.zeros(static, dtype=np.float32)
         return feeds
+
+    @staticmethod
+    def _fill_batch(result, sample, feeds) -> None:
+        """从 input_shape[0] 优先, 否则取首个输入张量的 batch 维(P0-10 要求 batch 落盘)。"""
+        if result.input_shape:
+            result.batch = int(result.input_shape[0])
+            return
+        if sample:
+            for value in sample.values():
+                arr = np.asarray(value)
+                if arr.ndim:
+                    result.batch = int(arr.shape[0])
+                    return
+        for value in feeds.values():
+            arr = np.asarray(value)
+            if arr.ndim:
+                result.batch = int(arr.shape[0])
+                return
 
     @staticmethod
     def _is_simulated(session: BaseRuntimeSession) -> bool:

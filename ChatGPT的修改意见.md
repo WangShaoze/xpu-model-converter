@@ -1,876 +1,934 @@
-我已经把你上传的 `xpu-model-converter.zip` 按“**准备进入第一阶段实际开发/交付**”的标准做了一轮代码审查，而不是只看目录结构。
+可以。我这次不再以“Adapter 有没有注册”为判断标准，而是按你要求的**真正交付链路**逐层审计：
 
-先给结论：
+> `模型 → Adapter → YAML → 输出契约 → Rewrite → Backend → Runtime → Tests → 当前缺陷 → 修改位置`
 
-> **现在这套代码的架构方向是对的，已经有了 60%～70% 的工程骨架；但还不能作为真正的 YOLOv10 → 昆仑芯 XPU 转换器交付。**
->
-> 最大的问题不是代码量，而是目前有几处“**模拟能力被设计成了真实能力的形状**”。尤其是 Kunlun Backend、算子白名单、YOLOv10 导出/后处理、Degraded 模式、精度验证这几处，如果不先改，后面接入真实昆仑 SDK 时会返工。
+我核对的是当前仓库 `main`，而且把 README 的“声明能力”和实际代码行为分开看。仓库当前明确把 **YOLOv10 Detection** 定义为唯一 V1 stable，其余 YOLO 都是 experimental；README 自身也明确 V1 范围是 YOLOv10 Detection。([GitHub][1])
 
-我建议**不要推倒重写**。保留现在的大体目录和 CLI，把核心链路做一次 V1.1 重构。
+---
 
-***
+# 一、先给最终审计结论
 
-# 一、我对当前代码的总体评价
+## 当前真正完成的，不是“9 个 YOLO 都完成”
 
-你现在的架构：
+我给当前仓库分成 4 个等级：
 
-```text
-xpu_converter
-│
-├── frontend
-├── ir
-├── optimizer
-├── rewrite
-├── backend
-├── validator
-├── exporter
-├── registry
-└── pipeline
-```
+| 等级                   | 定义                                                                                                    | 当前模型                                                                     |
+| -------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| **A：真实完成**           | Frontend → ONNX → Rewrite → Kunlun/Paddle-XPU → Runtime → Validation → Package 有完整闭环设计，并被项目定义为 stable | **YOLOv10 Detection**                                                    |
+| **B：前端基本完成**         | 模型加载、ONNX 导出、部分输出处理已有真实代码，但缺少完整 XPU/Runtime/真机验证                                                      | YOLOv5/v6/v7/v8/v9/v11/v12/YOLO26 Detection                              |
+| **C：任务 Adapter 已声明** | Adapter/YAML 有任务定义，但 Runtime/输出解码/交付链并没有对应完整实现                                                        | YOLOv7 Pose/Seg、YOLOv8 Seg/Pose/OBB/Cls、YOLOv9 Seg、YOLO11 多任务、YOLO26 多任务 |
+| **D：目前属于“名义支持”**     | 注册了 task，但没有相应任务级 Runtime/Backend/Validation 闭环                                                       | **YOLO26 Depth/Sem 尤其明显**                                                |
 
-这个方向是正确的。
-
-尤其这几个设计值得保留：
-
-- Frontend / Backend 解耦
-- Model Registry
-- Hardware Registry
-- ONNX 作为中间表示
-- Optimizer / Rewrite 独立
-- Accuracy Validator
-- Docker Exporter
-- `manifest.json`
-- Runtime 与模型解耦
-- `runtime.tgz`
-- CLI
-- 测试目录
-
-所以我**不建议推翻现有工程**。
-
-但是目前存在下面几个等级的问题：
-
-| 等级 | 问题                                                           |
-| -- | ------------------------------------------------------------ |
-| P0 | `stub` 默认可以一路生成“XPU 模型”和 Docker 包                            |
-| P0 | Kunlun `xpuctl` 实际 API 是猜测性的，并不是真正 SDK 集成                    |
-| P0 | 算子白名单是“假支持表”，没有绑定具体 XPU 型号/SDK 版本                            |
-| P0 | YOLOv10 `.pt` 加载能力不足，无法覆盖真实客户模型交付场景                          |
-| P0 | 精度验证实际上不能证明“PyTorch → XPU”正确                                 |
-| P1 | 算子分析发生在 Rewrite 之前，不能代表最终编译图                                 |
-| P1 | `validation_enabled=False` 仍然可能执行验证                          |
-| P1 | benchmark 可以对 stub/CPU 仿真结果进行测试                              |
-| P1 | Docker Runtime 中 XPU API 同样是猜测性的                             |
-| P1 | YOLO 后处理逻辑过于泛化，容易出现“能跑但结果错”                                  |
-| P1 | opset / dynamic / precision / shape 没有形成严格 Capability Matrix |
-| P1 | manifest / config 的职责存在重复                                    |
-| P2 | 版本、环境、SDK fingerprint 不够完整                                   |
-| P2 | 缺少真正的 Golden Model / Golden Dataset                          |
-| P2 | CI 目前更多是“结构测试”，不是转换正确性测试                                     |
-
-***
-
-# 二、最重要的问题：现在的 `stub` 设计需要改
-
-你现在：
+最重要的证据是：
 
 ```python
-StubSdkAdapter.compile()
+V1_STABLE_MODELS = ("yolov10",)
 ```
 
-实际上做的是：
+而 `ModelSupport.is_deliverable` 只有 `stable` 才返回 `True`。也就是说，**项目自身已经明确告诉我们：Adapter 存在 ≠ 可交付支持。** 
+
+---
+
+# 二、全局架构审计
+
+当前项目的架构实际上是对的：
 
 ```text
-optimized.onnx
-     ↓
-copy
-     ↓
-model.xpu
-```
-
-然后：
-
-```text
-artifact_format = "stub"
-degraded = true
-```
-
-这个设计用于**早期开发联调**是合理的。
-
-问题在于：
-
-```text
-allow_degraded=True
-```
-
-现在是默认值。
-
-CLI：
-
-```python
-allow_degraded=not getattr(args, "strict", False)
-```
-
-意味着用户直接：
-
-```bash
-xpu-converter convert ...
-```
-
-在没有昆仑 SDK 的机器上，会：
-
-```text
+best.pt
+   │
+   ▼
+Model Registry
+   │
+   ▼
+Frontend Adapter
+   │
+   ▼
 ONNX
- ↓
-stub
- ↓
-model.xpu
- ↓
-accuracy
- ↓
-benchmark
- ↓
-Docker ZIP
+   │
+   ├── Graph Check
+   ├── Operator Analysis
+   ├── Optimization
+   └── Rewrite
+   │
+   ▼
+Kunlun Backend
+   │
+   ├── Paddle XPU
+   ├── XPU Toolkit
+   └── Stub
+   │
+   ▼
+Runtime
+   │
+   ▼
+Validation
+   │
+   ▼
+Docker Export
 ```
 
-最终用户可能看到：
+Pipeline 代码实际执行了这条链：模型识别、加载、ONNX、Graph Check、Operator Analysis、Optimization/Rewrite，然后才进入 Compile。
+
+**问题不是架构错，而是“模型能力矩阵远远领先于后端和 Runtime 能力”。**
+
+---
+
+# 三、模型逐个审计
+
+## 1. YOLOv5
+
+### Adapter
+
+文件：
 
 ```text
-yolov10_dockerimg_v1.0.zip
+xpu_converter/frontend/pytorch/yolov5.py
 ```
 
-这非常危险。
-
-***
-
-# 三、必须把“开发模式”和“生产模式”彻底分开
-
-建议修改为：
+实际上支持的是：
 
 ```text
-PRODUCTION
-    ↓
-没有真实 Kunlun Backend
-    ↓
-直接失败
+YOLOv5u
 ```
 
-只有显式：
+而不是完整意义上的传统 Ultralytics YOLOv5。
 
-```bash
-xpu-converter convert \
-    --model best.pt \
-    --allow-degraded
-```
-
-才允许：
-
-```text
-stub
-```
-
-而且：
-
-> **`--allow-degraded`** **只能用于开发测试，不能生成可交付 ZIP。**
-
-建议：
+代码：
 
 ```python
-if artifact.degraded and export_docker:
-    raise PackageError(
-        "当前为 degraded/stub 产物，禁止生成正式 Docker 交付包"
-    )
+ultralytics_name = "yolov5u"
 ```
 
-如果你希望测试 Docker Exporter，可以单独：
+并明确写了 `yolov5nu.pt`。
 
-```bash
-xpu-converter package \
-    --model model.xpu \
-    --allow-degraded-package
-```
-
-但生产 CLI 默认绝对不能这样。
-
-***
-
-# 四、P0：Kunlun Backend 目前实际上还没有真正实现
-
-这是当前项目最大的技术空洞。
-
-你现在：
-
-```python
-XPU_TOOLKIT_MODULES = (
-    "xpu_toolkit",
-    "xtcl",
-    "xpu_inference"
-)
-```
-
-然后：
-
-```python
-compiler_cls = _first_attr(
-    module,
-    ("XpuCompiler", "Compiler", "XPUCompiler")
-)
-```
-
-再：
-
-```python
-compiler = compiler_cls(xpu_graph.onnx_path)
-
-result = compile_method(
-    output=str(target),
-    precision=xpu_graph.precision
-)
-```
-
-这个逻辑**不能作为真实昆仑 SDK 集成**。
-
-因为它实际上假设：
+### YAML
 
 ```text
-import xtcl
-     ↓
-Compiler(...)
-     ↓
-compile(output=..., precision=...)
+configs/models/yolov5.yaml
 ```
 
-但我们现在并不知道你们实际 SDK 是不是这种 API。
-
-所以这段代码不能继续向下堆。
-
-***
-
-# 五、正确修改方式：把 Backend 变成 Capability-driven
-
-现在：
+存在，定义：
 
 ```text
-KunlunBackend
-    ↓
-猜 SDK API
+task = detection
+input = 1x3x640x640
+opset = 13
+NMS = CPU
 ```
 
-改成：
+
+
+### 输出契约
+
+Adapter 假定：
 
 ```text
-KunlunBackend
-      │
-      ▼
-KunlunCapability
-      │
-      ├── chip
-      ├── sdk_version
-      ├── compiler_version
-      ├── supported_ops
-      ├── supported_precisions
-      ├── supported_opsets
-      ├── dynamic_shape
-      └── layout
+[1, 4 + num_classes, 8400]
 ```
 
-例如：
+raw detection。
 
-```python
-@dataclass
-class KunlunCapabilities:
-    chip: str
-    sdk_version: str
-    compiler_version: str
+### Rewrite
 
-    supported_ops: Set[OperatorSpec]
+走通用 Rewrite，主要针对 NMS 等。
 
-    supported_precisions: Set[str]
-    supported_opsets: Set[int]
+### Backend
 
-    dynamic_shape: bool
-    layouts: Set[str]
-```
+可以进入通用 Kunlun Backend。
 
-然后：
+### Runtime
 
-```python
-class KunlunBackend(BaseBackend):
+**问题开始出现。**
 
-    def capabilities(self):
-        return self.adapter.capabilities()
-
-    def compile(self, graph, config):
-        self.preflight(graph)
-        return self.adapter.compile(graph, config)
-```
-
-***
-
-# 六、SDK Adapter 不应该“猜 API”
-
-应该变成：
+当前交付 Runtime 目录只有：
 
 ```text
-backend/kunlun/
-│
-├── backend.py
-├── capabilities.py
-│
-└── adapters/
-    ├── base.py
-    ├── sdk_v1.py
-    ├── sdk_v2.py
-    └── paddle_xpu.py
+runtime/common
+runtime/detection
 ```
 
-例如：
+README 也明确写的是公共 Runtime + `detection/`。([GitHub][1])
 
-```python
-class KunlunCompilerAdapter(ABC):
+所以 YOLOv5 Detection：
 
-    @abstractmethod
-    def probe(self) -> KunlunEnvironment:
-        ...
+> **链路结构上成立，但没有证据证明真实 XPU 已验证。**
 
-    @abstractmethod
-    def compile(
-        self,
-        graph: XpuGraph,
-        config: KunlunCompileConfig,
-    ) -> BackendArtifact:
-        ...
+### 结论
 
-    @abstractmethod
-    def create_runtime(
-        self,
-        artifact: BackendArtifact,
-    ):
-        ...
-```
+**B：实验性 Detection。**
 
-拿到你们真实 SDK 后，只实现：
-
-```python
-class KunlunSdkVxAdapter(KunlunCompilerAdapter):
-    ...
-```
-
-而不是继续：
-
-```python
-getattr(module, "Compiler")
-getattr(module, "compile")
-```
-
-这种反射猜测。
-
-***
-
-# 七、P0：算子白名单现在不能当真实数据使用
-
-当前：
-
-```python
-NATIVE_OPS = {
-    "Conv",
-    "BatchNormalization",
-    "Resize",
-    ...
-}
-```
-
-问题非常大。
-
-例如：
+### 应修改
 
 ```text
-Resize
+xpu_converter/frontend/pytorch/yolov5.py
+configs/models/yolov5.yaml
+tests/models/test_yolov5.py
+tests/e2e/test_yolov5_detection.py
 ```
 
-是否支持，不应该只有：
+增加：
 
 ```text
-Resize = true
+官方 yolov5u 权重
+→ PyTorch output
+→ ONNX output
+→ ORT output
+→ Paddle-XPU output
+→ Runtime /predict
 ```
 
-而应该是：
+五层回归。
+
+---
+
+# 四、YOLOv6
+
+这是目前前端实现比较认真的一个。
+
+## Adapter
 
 ```text
-Resize
-├── mode=nearest
-│     ├── FP32 ✓
-│     ├── FP16 ✓
-│     └── INT8 ?
-│
-└── mode=bilinear
-      ├── FP32 ✓
-      ├── FP16 ?
-      └── INT8 ✗
+xpu_converter/frontend/pytorch/yolov6.py
 ```
 
-再例如：
+它没有伪装成 Ultralytics，而是明确：
 
 ```text
-Conv
+原生 YOLOv6
+pt → onnx → paddle
 ```
 
-还涉及：
+而且需要：
 
 ```text
-kernel
-stride
-padding
-dilation
-groups
-layout
-dtype
-```
-
-所以当前：
-
-```python
-Set[str]
-```
-
-太简单。
-
-***
-
-# 八、把 Operator Registry 升级成 Operator Capability
-
-建议：
-
-```python
-@dataclass(frozen=True)
-class OperatorCapability:
-    op_type: str
-    domain: str = ""
-
-    dtypes: Set[str] = field(default_factory=set)
-
-    attributes: Dict[str, Set[Any]] = field(
-        default_factory=dict
-    )
-
-    min_opset: int = 1
-    max_opset: Optional[int] = None
-```
-
-例如：
-
-```yaml
-operators:
-
-  Conv:
-    dtypes:
-      - float32
-      - float16
-
-  Resize:
-    dtypes:
-      - float32
-      - float16
-    attributes:
-      mode:
-        - nearest
-
-  MatMul:
-    dtypes:
-      - float16
-```
-
-最终分析：
-
-```text
-Resize
-    mode=bilinear
-    dtype=fp16
-    opset=13
-
-=> UNSUPPORTED
-
-Reason:
-    Resize(mode=bilinear, dtype=fp16)
-    is not supported by Kunlun P800 SDK 3.2
-```
-
-这才是真正的 Converter。
-
-***
-
-# 九、算子分析顺序必须调整
-
-当前：
-
-```text
-ONNX
- ↓
-Operator Analysis
- ↓
-Optimizer
- ↓
-Rewrite
- ↓
-Compile
-```
-
-有问题。
-
-例如：
-
-```text
-SiLU
-```
-
-原始图里：
-
-```text
-SiLU
-```
-
-算子分析会认为：
-
-```text
-REWRITTEN
-```
-
-但是经过：
-
-```text
-SiLU
- ↓
-Sigmoid + Mul
-```
-
-最终图已经不再有 SiLU。
-
-所以真正应该：
-
-```text
-Raw ONNX
-   ↓
-Graph Check
-   ↓
-Normalize
-   ↓
-Rewrite
-   ↓
-Optimize
-   ↓
-Final Operator Analysis
-   ↓
-Preflight
-   ↓
-Compile
-```
-
-即：
-
-### 第一次分析
-
-用于：
-
-```text
-diagnostic
-```
-
-### 第二次分析
-
-用于：
-
-```text
-compile gate
-```
-
-最终只认第二次。
-
-***
-
-# 十、建议把 Pipeline 改成这样
-
-你现在的：
-
-```text
-10 steps
-```
-
-我建议保留 CLI 显示的 10 步，但内部改成：
-
-```text
-01 Inspect
-02 Load
-03 Export
-04 Validate ONNX
-05 Normalize / Rewrite
-06 Optimize
-07 Final Capability Check
-08 Compile
-09 Validate / Benchmark
-10 Package
-```
-
-尤其：
-
-```text
-Final Capability Check
-```
-
-必须是硬门禁。
-
-***
-
-# 十一、P0：YOLOv10 `.pt` 加载器需要重点重构
-
-你现在：
-
-```python
-torch.load(...)
-```
-
-然后：
-
-```python
-if isinstance(obj, torch.nn.Module):
-    return obj
+/home/compose/develop/yolov6
 ```
 
 或者：
 
-```python
-for key in ("model", "ema", "net", "network"):
-    ...
-```
-
-这只能覆盖一部分情况。
-
-实际客户模型可能是：
-
 ```text
-best.pt
+XPU_MEITUAN_YOLOV6_REPO
 ```
 
-里面：
+源码才能反序列化 checkpoint。
+
+它还修改了：
 
 ```python
-{
-    "epoch": ...,
-    "model": ...,
-    "optimizer": ...,
-    "ema": ...,
-    "updates": ...,
-    "train_args": ...,
-}
+model.forward
+detect.export = False
 ```
 
-也可能：
-
-```python
-{
-    "state_dict": ...
-}
-```
-
-甚至：
-
-```python
-{
-    "model": "...",
-    "yaml": "...",
-}
-```
-
-***
-
-# 十二、必须建立 Model Source Contract
-
-这是我认为当前项目缺少的一个非常重要的概念。
-
-不要认为：
+把输出固定成：
 
 ```text
-best.pt
+[B, N, 5+nc]
 ```
 
-就是一个完整模型。
+这属于**真正的模型适配逻辑**，不是简单注册。
 
-应该定义：
+### YAML
+
+存在：
 
 ```text
-Model Package
+configs/models/yolov6.yaml
 ```
 
-例如：
+
+
+### 最大问题
+
+外部源码路径硬编码：
 
 ```text
-customer_model/
-├── best.pt
-├── model.yaml
-├── classes.txt
-├── requirements.txt
-└── metadata.json
+/home/compose/develop/yolov6
 ```
 
-其中：
+这不适合交付环境。
+
+### 应修改
+
+增加：
 
 ```yaml
-framework: pytorch
-model_type: yolov10
-
 source:
-  repository: ultralytics
-  version: xxx
-
-model:
-  checkpoint: best.pt
-
-input:
-  shape: [1,3,640,640]
+  repository: ...
+  revision: ...
+  required: true
 ```
 
-这样你才能保证：
+然后 Adapter 不直接依赖绝对路径。
 
-> 转换机拥有恢复这个模型所需要的代码和版本。
-
-***
-
-# 十三、对于 Ultralytics 模型，增加 Environment Fingerprint
-
-例如：
-
-```json
-{
-  "framework": "pytorch",
-  "framework_version": "2.x",
-  "ultralytics_version": "x.x.x",
-  "python_version": "3.10",
-  "cuda_version": "",
-  "checkpoint": "best.pt"
-}
-```
-
-转换时：
+建议：
 
 ```text
-best.pt
- +
-Ultralytics version
- +
-PyTorch version
+xpu_converter/frontend/pytorch/vendors/yolov6/
 ```
 
-必须记录。
+或者明确 `ModelDependencyResolver`。
 
-最终：
+### 结论
+
+**B：前端真实实现，但不是稳定交付。**
+
+---
+
+# 五、YOLOv7
+
+这是当前项目里前端工作量最大的一个。
+
+文件：
 
 ```text
-metadata.json
+xpu_converter/frontend/pytorch/yolov7.py
 ```
 
-里面必须有：
+包含：
 
 ```text
-source_framework
-source_framework_version
-source_library
-source_library_version
-python_version
-exporter_version
+YOLOv7Adapter
+YOLOv7PoseAdapter
+YOLOv7SegAdapter
 ```
 
-否则半年后你根本无法复现一次转换。
 
-***
 
-# 十四、YOLOv10 Adapter 目前还有一个重要问题
+## Detection
 
-你现在：
+输出：
+
+```text
+[1, N, 85]
+```
+
+并通过：
 
 ```python
+detect.export = False
+detect.concat = True
+```
+
+获得统一输出。
+
+这是合理的。
+
+## Pose
+
+输出：
+
+```text
+[1, N, 4+(1+nc)+3K]
+```
+
+并且：
+
+```python
+raw_output_index = 0
+```
+
+避免导出旁支。
+
+
+
+## Seg
+
+这里更复杂：
+
+```text
+det + mask coefficients
++
+proto
+```
+
+也就是双输出。
+
+源码甚至有：
+
+```text
+vendors/yolov7_seg_shim.py
+```
+
+解决 checkpoint 中：
+
+```text
+SegmentationModel
+ISegment
+Proto
+ImplicitA/M
+```
+
+等类缺失的问题。
+
+### 这是“真的实现”吗？
+
+**Frontend 层：是。**
+
+但：
+
+```text
+Runtime
+Output Decoder
+Application Validation
+Docker
+```
+
+目前并没有对应的完整 Seg/Pose Runtime。
+
+所以不能把：
+
+```text
+yolov7-seg
+```
+
+标成生产支持。
+
+### YAML
+
+甚至已经有：
+
+```text
+configs/models/yolov7-pose.yaml
+```
+
+并定义：
+
+```text
+task: pose
+input: 1280
+num_classes: 1
+```
+
+
+
+这说明作者确实在往多任务走。
+
+### 结论
+
+| YOLOv7    | 判断 |
+| --------- | -- |
+| Detection | B  |
+| Pose      | C  |
+| Seg       | C  |
+
+---
+
+# 六、YOLOv8
+
+Adapter：
+
+```text
+xpu_converter/frontend/pytorch/yolov8.py
+```
+
+有：
+
+```text
+YOLOv8
+YOLOv8Seg
+YOLOv8Pose
+YOLOv8Obb
+YOLOv8Cls
+```
+
+
+
+YAML 也对应存在：
+
+```text
+yolov8.yaml
+yolov8-seg.yaml
+yolov8-pose.yaml
+yolov8-obb.yaml
+yolov8-cls.yaml
+```
+
+例如 Seg/Pose/OBB/Cls 配置都已经存在。
+
+### 但这里有一个非常关键的假完成
+
+YOLOv8 的：
+
+```python
+YOLOv8SegAdapter
+YOLOv8PoseAdapter
+YOLOv8ObbAdapter
+YOLOv8ClsAdapter
+```
+
+核心实现基本是：
+
+```python
+class YOLOv8SegAdapter(YOLOv8Adapter):
+    task = "segment"
+```
+
+而不是：
+
+```text
+SegmentExporter
+PoseExporter
+OBBExporter
+ClassificationExporter
+```
+
+
+
+也就是说：
+
+> **模型类型注册已经完成，但任务级转换器没有真正分叉出来。**
+
+### 更严重的问题
+
+通用 PyTorch Adapter 对 Ultralytics 模型的策略是：
+
+```text
+YOLO(path)
+  ↓
+model.export(format="onnx")
+```
+
+
+
+这本身没问题，但你必须随后针对不同任务解析输出。
+
+现在 Runtime 交付层却只有 Detection。
+
+### 结论
+
+| YOLOv8         | 判断 |
+| -------------- | -- |
+| Detection      | B  |
+| Seg            | C  |
+| Pose           | C  |
+| OBB            | C  |
+| Classification | C  |
+
+---
+
+# 七、YOLOv9
+
+这个 Adapter 比 YOLOv8 更扎实。
+
+```text
+xpu_converter/frontend/pytorch/yolov9.py
+```
+
+Detection：
+
+```text
+raw_output_index = 0
+```
+
+并把 Detect 头：
+
+```text
+export=True
+```
+
+得到：
+
+```text
+[1, 4+nc, N]
+```
+
+
+
+Segmentation：
+
+```text
+output1 = det + mask coeff
+output2 = proto
+```
+
+源码明确设计成：
+
+```text
+SegmentDecoder
+```
+
+可以消费的形式。
+
+### YAML
+
+Detection YAML 存在：
+
+```text
+configs/models/yolov9.yaml
+```
+
+
+
+### 但是
+
+仍然依赖：
+
+```text
+XPU_THUYNGCH_YOLOV9_REPO
+```
+
+默认：
+
+```text
+/home/compose/develop/yolov9
+```
+
+而且还需要 torchvision stub。
+
+### 结论
+
+| YOLOv9       | 判断 |
+| ------------ | -- |
+| Detection    | B  |
+| Segmentation | C  |
+
+---
+
+# 八、YOLOv10 —— 当前唯一真正应该当作 Golden Path
+
+Adapter：
+
+```text
+xpu_converter/frontend/pytorch/yolov10.py
+```
+
+只有 18 行，但这是合理的。
+
+因为它本身依赖 Ultralytics。
+
+核心：
+
+```python
+model_type = "yolov10"
+ultralytics_name = "yolov10"
 end2end_default = True
 ```
 
-同时注释：
 
-> Ultralytics 导出的 ONNX 默认仍会带 NonMaxSuppression
 
-这件事情**不能作为假设**。
-
-必须对实际导出的 ONNX 做检测：
+### YAML
 
 ```text
-Graph
- ├── outputs
- ├── NMS nodes
- ├── detection head
- └── output shape
+configs/models/yolov10.yaml
 ```
 
-然后自动判断：
-
-```python
-ModelOutputContract.detect(graph)
-```
-
-例如：
+明确：
 
 ```text
-Case A:
+input: 1x3x640x640
+opset: 13
+end2end: false
+NMS: CPU
+```
 
-output:
-[1, 300, 6]
 
-=> end2end detection
 
-Case B:
+### Rewrite
 
-output:
-[1, 4+nc, 8400]
+这里是关键：
 
-=> raw detection
-
-Case C:
-
+```text
 NonMaxSuppression
-+
-Gather
-+
-output
-
-=> postprocess embedded
+        ↓
+CPU NMS
 ```
 
-不能简单：
+项目专门实现了：
 
 ```text
-model_type == yolov10
-    ↓
-一定是某一种 output
+xpu_converter/rewrite/nms.py
 ```
 
-***
+而且不是简单删除节点，而是：
 
-# 十五、我建议增加 Output Contract
+1. 找 NMS
+2. 找 downstream
+3. 判断 graph closure
+4. 判断有没有其它 output
+5. 最终将 graph output 替换成 boxes/scores
 
-这是 YOLO Runtime 目前缺少的关键层。
+
+
+这个设计是目前项目里**比较成熟的一块**。
+
+### Backend
+
+真实路径：
+
+```text
+ONNX
+ ↓
+X2Paddle
+ ↓
+Paddle static graph
+ ↓
+Paddle Inference
+ ↓
+enable_xpu()
+```
+
+源码明确说明 Paddle XPU kernel 在加载时编译。
+
+### Runtime
+
+存在：
+
+```text
+PaddleXpuRuntimeSession
+```
+
+能够：
 
 ```python
-@dataclass
-class OutputContract:
+config.enable_xpu()
+config.set_xpu_device_id()
+```
 
-    type: str
+并执行 predictor。
 
-    boxes_format: str
-    score_format: str
+### Validation
 
-    class_axis: Optional[int]
+精度验证明确区分：
 
-    has_objectness: bool
+```text
+Level 1:
+ONNX vs optimized ONNX
 
-    normalized: bool
+Level 2:
+optimized ONNX vs XPU
 
-    end2end: bool
+Level 3:
+application mAP
+```
 
-    nms_embedded: bool
+这个设计也是正确的。
+
+### Benchmark
+
+还专门禁止：
+
+```text
+ONNX Runtime CPU
+```
+
+伪装成 XPU benchmark：
+
+```text
+simulated → NOT_AVAILABLE
+```
+
+
+
+### Docker
+
+degraded artifact 默认禁止进入正式 package。
+
+### 结论
+
+**A：当前唯一真正应该作为 Stable/Golden Path 的模型。**
+
+---
+
+# 九、YOLO11
+
+Adapter：
+
+```text
+yolov11.py
+```
+
+存在：
+
+```text
+Detection
+Seg
+Pose
+OBB
+Cls
+```
+
+
+
+YAML 也有对应任务配置，例如：
+
+```text
+yolov11.yaml
+yolov11-seg.yaml
+...
+```
+
+
+
+但和 YOLOv8 一样：
+
+```python
+class YOLOv11SegAdapter(YOLOv11Adapter):
+    task = "segment"
+```
+
+主要还是 task declaration。
+
+### 结论
+
+| YOLO11    | 判断 |
+| --------- | -- |
+| Detection | B  |
+| Seg       | C  |
+| Pose      | C  |
+| OBB       | C  |
+| Cls       | C  |
+
+---
+
+# 十、YOLO12
+
+Adapter：
+
+```text
+xpu_converter/frontend/pytorch/yolo12.py
+```
+
+实际就是：
+
+```python
+ultralytics_name = "yolo12"
+```
+
+raw detection：
+
+```text
+[1, 4+nc, 8400]
+```
+
+
+
+YAML：
+
+```text
+configs/models/yolov12.yaml
+```
+
+存在。
+
+没有 Seg/Pose/OBB/Cls Adapter。
+
+### 结论
+
+**B：Detection experimental。**
+
+---
+
+# 十一、YOLO26 —— 当前最值得重点整改
+
+Adapter：
+
+```text
+xpu_converter/frontend/pytorch/yolo26.py
+```
+
+注册：
+
+```text
+yolov26
+yolov26-seg
+yolov26-pose
+yolov26-obb
+yolov26-cls
+yolov26-depth
+yolov26-sem
+```
+
+
+
+这就是之前“YOLO26 支持 7 个任务”这个说法的来源。
+
+但是看实现：
+
+```python
+class YOLO26DepthAdapter(YOLO26Adapter):
+    model_type = "yolov26-depth"
+    task = "depth"
+
+class YOLO26SemAdapter(YOLO26Adapter):
+    model_type = "yolov26-sem"
+    task = "sem"
+```
+
+就结束了。
+
+也就是说：
+
+```text
+Depth
+Semantic
+```
+
+没有看到：
+
+```text
+Depth decoder
+Semantic decoder
+task-specific backend contract
+task-specific runtime
+task-specific validation
+```
+
+### YAML
+
+反而已经有：
+
+```text
+configs/models/yolov26-depth.yaml
+```
+
+里面甚至写：
+
+```text
+逐像素深度图输出
+```
+
+
+
+**这恰恰暴露了一个设计问题：**
+
+配置文件声称的能力 > Runtime 实际能力。
+
+---
+
+# 十二、输出契约是当前最大的结构性缺陷
+
+现在项目在 YAML 里大量写：
+
+```yaml
+output_layout: auto
+```
+
+而 `ModelConfig` 的说明是：
+
+> 输出契约为空时，由实际 ONNX 图探测。
+
+这个对于 Detection 可以接受。
+
+但对于：
+
+```text
+Detection
+Segmentation
+Pose
+OBB
+Classification
+Depth
+Semantic Segmentation
+```
+
+已经不够了。
+
+因为它们的输出语义完全不同。
+
+应该建立：
+
+```text
+OutputContract
 ```
 
 例如：
@@ -878,2102 +936,861 @@ class OutputContract:
 ```yaml
 output:
   type: detection
-  format: cxcywh
-  layout: BCH
-  has_objectness: false
-  end2end: false
-  nms: cpu
+  layout: BNC
+  boxes:
+    format: xywh
+  objectness: true
+  classes:
+    activation: sigmoid
 ```
 
-然后 Runtime 不需要“猜”。
+Seg：
 
-***
-
-# 十六、现在 Runtime 的 `_parse_outputs()` 太危险
-
-现在：
-
-```python
-if array.shape[-1] == 6:
-    ...
+```yaml
+output:
+  type: segmentation
+  detection:
+    layout: BCN
+  mask_coeff:
+    channels: 32
+  proto:
+    layout: BCHW
 ```
 
-然后：
+Pose：
 
-```python
-if array.shape[0] < array.shape[1]:
-    ...
+```yaml
+output:
+  type: pose
+  keypoints:
+    count: 17
+    dims: 3
 ```
 
-这是典型：
+OBB：
 
-> **heuristic parser**
+```yaml
+output:
+  type: obb
+  angle:
+    unit: radian
+```
 
-短期能跑，长期一定出错。
+Cls：
+
+```yaml
+output:
+  type: classification
+  layout: BC
+```
+
+Depth：
+
+```yaml
+output:
+  type: depth
+  layout: BCHW
+```
+
+Sem：
+
+```yaml
+output:
+  type: semantic_segmentation
+  layout: BCHW
+```
+
+**现在缺的就是这一层“任务级标准契约”。**
+
+---
+
+# 十三、Rewrite 层审计
+
+当前 Rewrite 做得比较好的地方是：
+
+```text
+xpu_converter/rewrite/nms.py
+```
+
+NMS rewrite 有比较严谨的安全检查。
+
+但是当前 Rewrite 的思想还是：
+
+```text
+后端不支持某个 OP
+        ↓
+把 OP 改写掉
+```
+
+对于 YOLO 多任务，还应该增加：
+
+```text
+YOLO Task Rewrite
+```
 
 例如：
 
 ```text
-[1, 300, 6]
+Ultralytics Segment
+        ↓
+统一 Segment IR
 ```
 
-和：
+而不是让 Runtime 猜：
 
 ```text
-[1, 6, 300]
+output1 是什么？
+output2 是什么？
 ```
 
-虽然能猜，但：
+建议新增：
 
 ```text
-4+nc
-5+nc
-end2end
-objectness
+xpu_converter/rewrite/yolo/
+    detection.py
+    segmentation.py
+    pose.py
+    obb.py
+    classification.py
 ```
 
-语义完全不同。
+---
 
-所以必须由：
+# 十四、Backend 审计：这里必须明确“真实 XPU”和“模拟 XPU”
+
+这是当前代码里我认为做得比较诚实的地方。
+
+Backend 有：
 
 ```text
-model.yaml
+PaddleXpuSdkAdapter
+XpuToolkitSdkAdapter
+StubSdkAdapter
 ```
 
-明确声明。
 
-***
 
-# 十七、Runtime 应该变成 Contract-driven
+其中：
 
-不要：
+### Paddle
 
-```python
-_parse_outputs()
-```
-
-猜格式。
-
-改：
-
-```python
-decoder = DecoderFactory.create(
-    config.output_contract
-)
-```
-
-例如：
+是真实路线：
 
 ```text
-runtime/detection/decoders/
-├── base.py
-├── yolov8_raw.py
-├── yolov10_raw.py
-├── end2end_6col.py
-└── generic.py
+ONNX → Paddle static graph
 ```
 
 然后：
 
-```python
-decoder.decode(outputs)
+```text
+Paddle Inference → XPU
 ```
 
-***
+### xpuctl
 
-# 十八、P0：当前精度验证还不能证明真正的 XPU 精度
-
-现在：
+仍然是：
 
 ```text
-reference = ONNX CPU
-target = backend.create_runtime()
+TODO(SDK)
 ```
 
-如果是 stub：
+当前只是抽象接口。
+
+### stub
+
+明确：
 
 ```text
-target = ONNX Runtime
+ONNX copy
 ```
 
-于是：
+并且：
 
 ```text
-ONNX
-  ↓
-ONNX Runtime
+degraded
 ```
 
-对比：
+禁止正式交付。
+
+### 所以
+
+**不能说当前项目完全没有 XPU Backend。**
+
+更准确：
+
+> **Paddle-XPU 路线已经实现；原生 XPU Toolkit/XTCL 路线还是抽象预留。**
+
+---
+
+# 十五、Runtime 是整个项目当前最明显的“能力断层”
+
+README 明确列的是：
 
 ```text
-ONNX
-  ↓
-ONNX Runtime
+runtime/
+├── common/
+└── detection/
 ```
 
-当然几乎完全一致。
-
-这只能证明：
-
-> stub 没有把文件复制坏。
-
-不能证明：
-
-> 昆仑 XPU 正确。
-
-***
-
-# 十九、V1 应该明确三种 Validation Level
-
-## Level 1：Graph Validation
+也明确写：
 
 ```text
-ONNX
- ↓
-Optimized ONNX
+Detection service:
+/predict
+/predict_image
+/health
+/setflag
 ```
 
-比较：
+([GitHub][1])
+
+但你现在 Adapter 已经注册：
 
 ```text
-原 ONNX
-优化 ONNX
+segment
+pose
+obb
+cls
+depth
+sem
 ```
 
-***
-
-## Level 2：Backend Validation
+所以出现：
 
 ```text
-Optimized ONNX
+Frontend 能力
        ↓
-     CPU
-       vs
-       XPU
+       ↓
+       ↓
+Runtime 能力
 ```
 
-这才是真正：
+中间断层。
 
-```text
-XPU numerical validation
-```
+### DockerExporter 更直接证明这一点
 
-***
-
-## Level 3：Application Validation
-
-YOLO：
-
-```text
-Image
- ↓
-PyTorch
- ↓
-Detection
-```
-
-vs：
-
-```text
-Image
- ↓
-XPU
- ↓
-Detection
-```
-
-比较：
-
-```text
-IoU
-Precision
-Recall
-mAP
-```
-
-这三级必须区分。
-
-***
-
-# 二十、Accuracy Report 建议最终长这样
-
-```json
-{
-  "graph": {
-    "passed": true,
-    "max_abs_error": 1.2e-6
-  },
-
-  "backend": {
-    "reference": "onnxruntime-cpu",
-    "target": "kunlun-xpu",
-    "passed": true,
-    "max_abs_error": 0.00031,
-    "cosine_similarity": 0.999997
-  },
-
-  "application": {
-    "task": "detection",
-    "samples": 500,
-    "precision": 0.9231,
-    "recall": 0.9173,
-    "map50": 0.9341,
-    "map5095": 0.7212
-  }
-}
-```
-
-***
-
-# 二十一、P1：`validation_enabled` 要真正生效
-
-现在 pipeline：
+它根据：
 
 ```python
-self._run_step(7, self._step_validate)
+RuntimePackager(task=self.runtime)
 ```
 
-无论：
+去找：
 
 ```text
-validation_enabled
+runtime/common
+runtime/<task>
 ```
 
-是什么，都会进入。
 
-应该：
+
+当前只有：
+
+```text
+runtime/detection
+```
+
+那么：
+
+```text
+runtime=segment
+```
+
+实际上就会因为目录不存在而失败：
 
 ```python
-if self.validation_enabled:
-    self._run_step(7, self._step_validate)
-else:
-    self._skip_step(...)
+raise PackageError("Runtime 目录不存在")
 ```
 
-并且不能把：
 
-```text
-SKIPPED
+
+### 这意味着
+
+**YOLOv8-seg 虽然 Adapter 存在，但无法形成完整 Docker Runtime 交付。**
+
+这就是一个非常典型的：
+
+> **“代码存在 ≠ 功能完成”**
+
+---
+
+# 十六、Tests 审计
+
+仓库有 `tests/` 目录，而且 README 的测试入口是：
+
+```bash
+python -m unittest discover -s tests -t .
 ```
 
-打印成：
+但 README 明确说明：
+
+> 没有 torch / ultralytics 时，测试使用**合成 ONNX 图**验证优化、改写、编译、校验、打包全链路。([GitHub][1])
+
+这意味着目前测试体系主要验证：
 
 ```text
-OK
-```
-
-建议：
-
-```text
-[08] Accuracy Validation SKIPPED
-```
-
-***
-
-# 二十二、Benchmark 也一样
-
-如果：
-
-```text
-backend = stub
-```
-
-则：
-
-```text
-Benchmark = NOT_AVAILABLE
+Pipeline Framework
 ```
 
 而不是：
 
 ```text
-avg=0.03ms
+YOLO Model Conformance
 ```
 
-否则很容易有人把：
+这是一个非常大的区别。
 
-```text
-ONNXRuntime CPU
-```
-
-的数据拿去宣传：
-
-```text
-昆仑 XPU 性能
-```
-
-***
-
-# 二十三、Benchmark 必须记录硬件指纹
-
-正式 benchmark：
-
-```json
-{
-  "backend": "kunlun-xpu",
-  "chip": "xxx",
-  "device_id": 0,
-  "sdk_version": "xxx",
-  "driver_version": "xxx",
-  "firmware_version": "xxx",
-
-  "model": "yolov10n",
-  "input_shape": [1,3,640,640],
-  "precision": "fp16",
-
-  "warmup": 20,
-  "iterations": 500,
-
-  "latency_ms": {
-    "mean": 4.31,
-    "p50": 4.20,
-    "p90": 4.62,
-    "p99": 5.13
-  }
-}
-```
-
-这样才有工程意义。
-
-***
-
-# 二十四、P1：Docker Runtime 的 XPU API 也不能继续猜
-
-当前：
-
-```python
-XPU_TOOLKIT_MODULES = (
-    "xpu_toolkit",
-    "xtcl",
-    "xpu_inference"
-)
-```
-
-然后：
-
-```python
-XpuRuntime
-Runtime
-XpuInference
-```
-
-这是和 Compiler 层一样的问题。
-
-必须变成：
-
-```text
-Backend
-   │
-   ├── CompilerAdapter
-   │
-   └── RuntimeAdapter
-```
-
-而且：
-
-```text
-Converter Runtime
-```
-
-和：
-
-```text
-Docker Runtime
-```
-
-最好共用同一个 Runtime Adapter。
-
-否则会出现：
-
-```text
-转换器认为：
-SDK API A
-
-Docker：
-SDK API B
-```
-
-最后转换成功但 Docker 跑不起来。
-
-***
-
-# 二十五、建议增加一个 `xpu_runtime` 抽象
-
-```python
-class XpuRuntimeAdapter(ABC):
-
-    @classmethod
-    def probe(cls):
-        ...
-
-    def load(self, artifact):
-        ...
-
-    def infer(self, inputs):
-        ...
-
-    def close(self):
-        ...
-```
-
-然后：
-
-```text
-KunlunSdkAdapter
-      │
-      ├── compile()
-      └── runtime()
-```
-
-保证编译和运行使用同一 SDK contract。
-
-***
-
-# 二十六、P1：`configs/hardware/kunlun.yaml` 现在混了太多东西
-
-目前：
-
-```yaml
-base_image:
-sdk_adapter:
-target_chip:
-precision:
-device:
-optimization_level:
-
-runtime:
-...
-
-docker:
-...
-log:
-...
-```
-
-建议拆：
-
-```text
-configs/
-├── hardware/
-│   └── kunlun/
-│       ├── base.yaml
-│       ├── capabilities.yaml
-│       ├── sdk.yaml
-│       └── docker.yaml
-│
-├── models/
-│   └── yolov10.yaml
-│
-└── runtime/
-    └── detection.yaml
-```
-
-职责清晰很多。
-
-***
-
-# 二十七、特别是 Docker 配置不能属于 Hardware Capability
-
-例如：
-
-```yaml
-base_image:
-packages_dir:
-minio:
-kafka:
-```
-
-这些不是：
-
-```text
-Kunlun XPU Capability
-```
-
-而是：
-
-```text
-Deployment Environment
-```
-
-建议：
-
-```text
-hardware/
-    kunlun.yaml
-
-deployment/
-    kunlun_docker.yaml
-```
-
-***
-
-# 二十八、P1：现在 `manifest.json` 和 `model.yaml` 有职责重叠
-
-现在：
-
-```text
-model/model.yaml
-```
-
-实际上是 Build Manifest。
-
-而：
-
-```text
-manifest.json
-```
-
-又是 Package Manifest。
-
-这两个应该明确：
-
-### model.yaml
-
-描述：
-
-> **如何产生这个模型**
-
-例如：
-
-```yaml
-source:
-target:
-input:
-optimization:
-validation:
-```
-
-### manifest.json
-
-描述：
-
-> **这个 Docker 包里面有什么**
-
-例如：
-
-```json
-{
-  "package_name": "...",
-  "files": [],
-  "checksums": [],
-  "runtime": {},
-  "artifact": {}
-}
-```
-
-不要让两者都成为“唯一事实来源”。
-
-***
-
-# 二十九、建议引入 Artifact Manifest
-
-实际上最终应该有三个 manifest：
-
-```text
-1. build.yaml
-   转换输入
-
-2. artifact.json
-   model.xpu 的来源与编译信息
-
-3. manifest.json
-   Docker Package 内容
-```
-
-关系：
-
-```text
-build.yaml
-    ↓
-artifact.json
-    ↓
-manifest.json
-```
-
-这样审计非常清楚。
-
-***
-
-# 三十、Artifact metadata 建议扩展
-
-现在：
-
-```json
-{
-  "sdk_adapter": "...",
-  "precision": "...",
-  "target_chip": "..."
-}
-```
-
-远远不够。
-
-建议：
-
-```json
-{
-  "artifact_format": "kunlun_xpu",
-
-  "converter": {
-    "name": "xpu-model-converter",
-    "version": "1.1.0"
-  },
-
-  "source": {
-    "framework": "pytorch",
-    "framework_version": "2.x",
-    "model_type": "yolov10",
-    "model_sha256": "..."
-  },
-
-  "export": {
-    "onnx_opset": 17,
-    "input_shape": [1,3,640,640]
-  },
-
-  "optimization": {
-    "level": 2,
-    "passes": [...]
-  },
-
-  "backend": {
-    "name": "kunlun",
-    "chip": "...",
-    "sdk_version": "...",
-    "compiler_version": "..."
-  },
-
-  "precision": "fp16",
-
-  "artifact": {
-    "file": "model.xpu",
-    "sha256": "..."
-  }
-}
-```
-
-***
-
-# 三十一、P1：必须增加 SHA256 的 Source Model Fingerprint
-
-这是以后非常有用的东西。
-
-比如：
-
-```text
-best.pt
-SHA256:
-b3d7....
-```
-
-转换得到：
-
-```text
-model.xpu
-SHA256:
-7f21....
-```
-
-最终：
-
-```text
-Docker Package
-```
-
-都记录。
-
-以后客户说：
-
-> “这个模型不是我给你的那个模型。”
-
-你可以直接验证。
-
-***
-
-# 三十二、P1：需要增加 Preflight
-
-现在流程是：
-
-```text
-compile
-```
-
-过程中才发现问题。
-
-应该在 compile 前：
-
-```bash
-xpu-converter preflight ...
-```
-
-输出：
-
-```text
-Environment
-=================================
-Python             3.10
-PyTorch            2.x
-ONNX               1.x
-
-Kunlun
-=================================
-Chip               P800
-SDK                3.x
-Compiler           x.x
-Driver             x.x
-
-Model
-=================================
-YOLOv10
-Input              [1,3,640,640]
-Precision          FP16
-
-Operator
-=================================
-Conv               72      OK
-BN                 72      FUSED
-SiLU               72      REWRITTEN
-Resize              5      OK
-
-Unsupported:
-0
-
-Result:
-READY
-```
-
-如果：
-
-```text
-GridSample
-```
-
-不支持：
-
-```text
-Result:
-NOT READY
-```
-
-根本不要进入 compile。
-
-***
-
-# 三十三、P0：要建立 Capability Matrix
-
-最终你会非常需要这个：
-
-```text
-                    Kunlun P800 SDK X
-------------------------------------------------
-YOLOv10n FP32       ✓
-YOLOv10n FP16       ✓
-YOLOv10s FP16       ✓
-YOLOv10m FP16       ✓
-
-Static Shape        ✓
-Dynamic Shape       ✗
-
-NCHW                ✓
-NHWC                ?
-
-Resize nearest     ✓
-Resize bilinear     ?
-
-NMS                 CPU
-```
-
-代码：
-
-```text
-capability/
-├── model_capability.py
-├── operator_capability.py
-└── hardware_capability.py
-```
-
-***
-
-# 三十四、优化器目前也需要一个重要原则
-
-你现在有：
-
-```text
-constant_fold
-fusion
-graph_simplify
-shape_inference
-```
-
-方向没问题。
-
-但以后必须遵守：
-
-> **所有 Graph Rewrite 必须经过 numerical equivalence test。**
-
-尤其：
-
-```text
-Conv + BN
-```
-
-必须考虑：
-
-```text
-training/eval
-epsilon
-bias
-weight sharing
-dtype
-```
-
-你现在已经考虑了 weight sharing，这是好的。
-
-继续保持这个思路。
-
-***
-
-# 三十五、Optimizer 应该变成 Pass Manager
-
-建议：
-
-```python
-class PassManager:
-
-    def run(self, graph):
-        for pass_ in self.passes:
-
-            before = snapshot(graph)
-
-            result = pass_.run(graph)
-
-            if result.changed:
-                validate_graph(graph)
-```
-
-每个 pass 记录：
-
-```json
-{
-  "pass": "conv_bn_fusion",
-  "changed": true,
-  "nodes_before": 143,
-  "nodes_after": 71,
-  "numerical_check": true
-}
-```
-
-***
-
-# 三十六、Rewrite 同样要支持“失败回滚”
-
-这是当前设计里很值得加强的一点。
-
-现在：
-
-```python
-rewrite.apply(graph)
-```
-
-直接修改。
-
-建议：
-
-```text
-Graph A
-  │
-  ▼
-Copy
-  │
-  ▼
-Rewrite
-  │
-  ▼
-ONNX Check
-  │
-  ▼
-Numerical Check
-  │
- ┌┴─────────┐
-PASS       FAIL
- │           │
- ▼           ▼
-commit     rollback
-```
-
-尤其：
-
-```text
-NMS rewrite
-Resize rewrite
-YOLO head rewrite
-```
-
-后面很容易出问题。
-
-***
-
-# 三十七、NMS Rewrite 目前不要作为“通用 ONNX Rewrite”
-
-这是我建议你特别改的一点。
-
-现在：
-
-```text
-rewrite/nms.py
-```
-
-直接：
-
-```text
-NonMaxSuppression → CPU
-```
-
-实际上这不是普通 graph rewrite。
-
-它是：
-
-> **模型输出契约改变**
-
-所以应该放到：
-
-```text
-frontend/model_contract
-```
-
-而不是简单：
-
-```text
-rewrite
-```
-
-例如：
-
-```text
-YOLOv10 Adapter
-    ↓
-Output Contract
-    ↓
-strip_postprocess()
-    ↓
-raw output
-```
-
-这样更合理。
-
-***
-
-# 三十八、推荐新的模块结构
-
-不推翻现有结构，只调整：
-
-```text
-xpu_converter/
-│
-├── frontend/
-│   ├── pytorch/
-│   │   └── yolov10.py
-│   │
-│   └── paddle/
-│
-├── contract/
-│   ├── input.py
-│   ├── output.py
-│   ├── preprocess.py
-│   └── postprocess.py
-│
-├── ir/
-│
-├── passes/
-│   ├── normalize/
-│   ├── rewrite/
-│   └── optimize/
-│
-├── capability/
-│   ├── operators.py
-│   ├── hardware.py
-│   └── matrix.py
-│
-├── backend/
-│   └── kunlun/
-│       ├── backend.py
-│       ├── compiler.py
-│       ├── runtime.py
-│       ├── capabilities.py
-│       └── adapters/
-│
-├── validator/
-│   ├── graph.py
-│   ├── backend.py
-│   ├── application.py
-│   └── benchmark.py
-│
-├── artifact/
-│   ├── manifest.py
-│   └── metadata.py
-│
-├── exporter/
-│
-└── pipeline/
-```
-
-***
-
-# 三十九、Pipeline 最终应该是这个样子
-
-这是我建议你接下来真正实施的核心。
-
-```text
-                 best.pt
-                    │
-                    ▼
-             ┌─────────────┐
-             │ Model Probe  │
-             └──────┬──────┘
-                    │
-                    ▼
-              YOLOv10Adapter
-                    │
-                    ▼
-              Load / Restore
-                    │
-                    ▼
-             PyTorch Model
-                    │
-                    ▼
-             ONNX Export
-                    │
-                    ▼
-             ONNX Validator
-                    │
-                    ▼
-          ┌────────────────────┐
-          │ Graph Normalize    │
-          │ Shape Inference    │
-          │ Constant Folding   │
-          │ Model Rewrite      │
-          │ Conv-BN Fusion     │
-          └─────────┬──────────┘
-                    │
-                    ▼
-             Final ONNX Graph
-                    │
-                    ▼
-          Capability Analyzer
-                    │
-             ┌──────┴──────┐
-             │             │
-            FAIL           PASS
-             │             │
-             ▼             ▼
-           STOP       Kunlun Compiler
-                           │
-                           ▼
-                       model.xpu
-                           │
-                           ▼
-                  Backend Validation
-                           │
-                           ▼
-                    Application Test
-                           │
-                           ▼
-                       Benchmark
-                           │
-                           ▼
-                     Artifact Build
-                           │
-                           ▼
-                     Docker Export
-                           │
-                           ▼
-              yolov10_xxx_dockerimg_v1.0.zip
-```
-
-***
-
-# 四十、Docker Exporter 这一部分其实已经做得比较好了
-
-你当前：
-
-```text
-DockerExporter
-RuntimePackager
-TemplateRenderer
-PackageManifest
-```
-
-这一层我评价比较高。
-
-尤其：
-
-```text
-runtime.tgz
-```
-
-与模型解耦，这是正确方向。
-
-我建议主要做**安全性和可复现性增强**，不要重写。
-
-***
-
-# 四十一、Docker 包必须禁止 degraded artifact
-
-最终：
-
-```python
-DockerExporter.export(...)
-```
-
-开头直接：
-
-```python
-if artifact.degraded:
-    raise PackageError(
-        "degraded artifact 不允许生成正式 Docker 交付包"
-    )
-```
-
-开发测试如果需要：
-
-```bash
---dev-package
-```
-
-才允许。
-
-***
-
-# 四十二、你现在的 Docker 默认日志配置存在安全问题
-
-`kunlun.yaml` 里：
-
-```yaml
-minio_access_key: "minioadmin"
-minio_secret_key: "minioadmin123"
-```
-
-这个不应该进入正式交付模板。
-
-特别是：
-
-```text
-Dockerfile
-install.conf
-readme.txt
-manifest.json
-```
-
-都可能泄露。
-
-应该改成：
-
-```yaml
-minio_host: ""
-minio_port: ""
-minio_bucket: ""
-minio_access_key: ""
-minio_secret_key: ""
-```
-
-现场：
-
-```bash
-docker run \
-  -e MINIO_ACCESS_KEY=...
-  -e MINIO_SECRET_KEY=...
-```
-
-或者使用：
-
-```text
-install.conf
-```
-
-但也不要提交默认密码。
-
-***
-
-# 四十三、Runtime 的 CPU fallback 也应该更严格
-
-当前：
-
-```text
-没有 /dev/xpuctrl
-       ↓
-CPU
-```
-
-对于正式 XPU 模型：
-
-```text
-model.xpu
-```
-
-我建议：
-
-```text
-DEVICE=auto
- ↓
-没有 XPU
- ↓
-启动失败
-```
-
-不要自动 CPU。
-
-只有：
-
-```bash
-DEVICE=cpu
-```
-
-并且模型本身是：
-
-```text
-ONNX / stub
-```
-
-才能 CPU。
-
-否则：
-
-> 客户部署失败时，系统悄悄 CPU 跑起来，性能突然掉 100 倍，排查非常困难。
-
-***
-
-# 四十四、最终 Runtime 规则
-
-```text
-artifact_format = xpu
-        │
-        ├── DEVICE=xpu
-        │      ↓
-        │    XPU
-        │
-        ├── DEVICE=auto
-        │      ↓
-        │    XPU exists?
-        │      ├── YES → XPU
-        │      └── NO  → FAIL
-        │
-        └── DEVICE=cpu
-               ↓
-             FAIL
-```
-
-除非：
-
-```text
-artifact_format = onnx
-```
-
-才：
-
-```text
-DEVICE=cpu
-```
-
-***
-
-# 四十五、当前测试体系需要升级
-
-现在测试：
-
-```text
-26 tests
-```
-
-由于环境没有 `onnx`，实际：
-
-```text
-24 ERROR
-2 OK
-```
-
-这里有一个问题。
-
-虽然测试环境缺少 ONNX 是环境问题，但：
-
-> **测试套件不应该在缺失可选依赖时让大量测试全部 ERROR。**
-
-应该：
-
-```python
-@unittest.skipUnless(
-    onnx_available(),
-    "requires onnx"
-)
-```
+## 现在缺少的测试层
 
-或者把依赖分层：
+应该建立：
 
 ```text
 tests/
 ├── unit/
-│   ├── config
-│   ├── registry
-│   ├── manifest
-│   └── runtime
-│
-├── graph/
-│   ├── optimizer
-│   └── rewrite
-│
-├── integration/
-│   └── onnx
-│
-└── e2e/
-    └── kunlun
+├── model/
+│   ├── yolov5/
+│   ├── yolov6/
+│   ├── yolov7/
+│   ├── yolov8/
+│   ├── yolov9/
+│   ├── yolov10/
+│   ├── yolov11/
+│   ├── yolov12/
+│   └── yolov26/
+├── runtime/
+├── backend/
+├── e2e/
+└── fixtures/
 ```
 
-***
-
-# 四十六、测试必须增加四层
-
-## Unit
+每个模型至少：
 
 ```text
-Config
-Registry
-Manifest
-Graph
-Rewrite
+test_load
+test_export
+test_output_contract
+test_onnxruntime
+test_xpu
+test_runtime
+test_package
 ```
 
-***
+---
 
-## ONNX Integration
+# 十七、真正的模型能力矩阵
+
+这是我建议你直接作为项目正式 `SUPPORT_MATRIX.yaml` 的第一版：
+
+| Model       | Detection | Seg | Pose | OBB | Cls | Depth | Sem | Stable |
+| ----------- | --------: | --: | ---: | --: | --: | ----: | --: | -----: |
+| YOLOv5u     |        🟡 |   — |    — |   — |   — |     — |   — |      ❌ |
+| YOLOv6      |        🟡 |   — |    — |   — |   — |     — |   — |      ❌ |
+| YOLOv7      |        🟡 |  🟠 |   🟠 |   — |   — |     — |   — |      ❌ |
+| YOLOv8      |        🟡 |  🟠 |   🟠 |  🟠 |  🟠 |     — |   — |      ❌ |
+| **YOLOv10** |    **🟢** |   — |    — |   — |   — |     — |   — |  **✅** |
+| YOLOv9      |        🟡 |  🟠 |    — |   — |   — |     — |   — |      ❌ |
+| YOLO11      |        🟡 |  🟠 |   🟠 |  🟠 |  🟠 |     — |   — |      ❌ |
+| YOLO12      |        🟡 |   — |    — |   — |   — |     — |   — |      ❌ |
+| YOLO26      |        🟡 |  🟠 |   🟠 |  🟠 |  🟠 |    🔴 |  🔴 |      ❌ |
+
+其中：
+
+* 🟢 = 当前项目可以作为正式 Golden Path
+* 🟡 = Frontend/ONNX 路线已有
+* 🟠 = Adapter/YAML 有，但 Runtime/Validation 不完整
+* 🔴 = **目前明显属于“声明式支持”，不能称为已实现**
+
+---
+
+# 十八、我认为当前仓库最重要的 10 个问题
+
+按优先级排序：
+
+## P0-1：Runtime 只有 Detection
+
+修改：
 
 ```text
-PyTorch
- ↓
-ONNX
- ↓
-ONNX Runtime
+runtime/
 ```
 
-***
-
-## Kunlun Integration
-
-需要真实 XPU：
+至少增加：
 
 ```text
-ONNX
- ↓
-Kunlun Compiler
- ↓
-XPU
+runtime/segmentation/
+runtime/pose/
+runtime/obb/
+runtime/classification/
 ```
 
-***
+Depth/Sem 后续增加。
 
-## E2E
+---
 
-真正：
+## P0-2：建立统一 OutputContract
+
+新增：
 
 ```text
-best.pt
- ↓
-Docker ZIP
- ↓
-docker build
- ↓
-docker run
- ↓
-curl /health
- ↓
-curl /predict
+xpu_converter/contracts/
+    base.py
+    detection.py
+    segmentation.py
+    pose.py
+    obb.py
+    classification.py
+    depth.py
+    semantic.py
 ```
 
-这是最终交付的验收测试。
+这是整个多任务扩展的核心。
 
-***
+---
 
-# 四十七、我建议建立 Golden Model
+## P0-3：Adapter 不应该自己“猜输出”
 
-例如：
+现在大量：
 
 ```text
-tests/golden/
-└── yolov10n/
-    ├── model.pt
-    ├── images/
-    │   ├── bus.jpg
-    │   └── zidane.jpg
-    │
-    ├── reference/
-    │   ├── outputs.npy
-    │   └── detections.json
-    │
-    └── expected.yaml
+output_layout: auto
 ```
 
-每次代码改动：
+应改成：
 
 ```text
-YOLOv10
- ↓
-ONNX
- ↓
-Optimize
- ↓
-XPU
+Adapter
+   ↓
+OutputContract
+   ↓
+IR
+   ↓
+Runtime
 ```
 
-都自动跑。
+---
 
-这样你以后修改：
+## P0-4：YOLO26 Depth/Sem 立即降级
+
+当前：
 
 ```text
-SiLU
-Resize
-Conv-BN
-NMS
+yolov26-depth
+yolov26-sem
 ```
 
-不会把 YOLO 搞坏。
-
-***
-
-# 四十八、你当前的 `images/yolov5-test-images` 也应该升级
-
-现在：
-
-```text
-images/
-└── yolov5-test-images
-```
-
-这个目录名已经和 V1 的 YOLOv10 不匹配。
-
-改成：
-
-```text
-tests/assets/
-└── detection/
-    ├── bus.jpg
-    └── zidane.jpg
-```
-
-不要绑定具体 YOLO 版本。
-
-***
-
-# 四十九、模型配置也需要收敛
-
-现在你已经有：
-
-```text
-yolov5.yaml
-yolov8.yaml
-yolov9.yaml
-yolov10.yaml
-yolov11.yaml
-yolov12.yaml
-yolov26.yaml
-```
-
-但当前阶段**不要真的宣称支持这么多模型**。
+不能继续挂在“支持列表”里让用户误以为可用。
 
 建议：
 
 ```text
-V1.0
-    yolov10
-
-V1.1
-    yolov8
-    yolov9
-    yolov11
-
-V2.0
-    PaddleOCR
+status = planned
 ```
 
-没有经过：
+或者：
 
 ```text
-export
-compile
-accuracy
-benchmark
-docker
+experimental
+deliverable = false
 ```
 
-完整验证的模型，不应该进入：
+直到 Runtime + Validation 完成。
 
-```text
-available_model_types()
-```
+---
 
-或者至少标记：
+## P0-5：YOLOv8/11 多任务也不能继续只靠 subclass
 
-```yaml
-status: experimental
-```
-
-***
-
-# 五十、模型 Registry 应该支持生命周期状态
-
-例如：
+目前：
 
 ```python
-@dataclass
-class ModelSupport:
-
-    model_type: str
-
-    status: str
-    # stable / experimental / deprecated
-
-    framework: str
-
-    min_version: str
+class YOLOv11PoseAdapter(YOLOv11Adapter):
+    task = "pose"
 ```
 
-CLI：
+远远不够。
 
-```bash
-xpu-converter list-models
-```
-
-输出：
+应该变成：
 
 ```text
-Model       Framework    Status
------------------------------------
-yolov10     PyTorch      STABLE
-yolov8      PyTorch      EXPERIMENTAL
-yolov9      PyTorch      EXPERIMENTAL
-yolov11     PyTorch      EXPERIMENTAL
-ppocr       Paddle       PLANNED
+YOLO11PoseAdapter
+    ↓
+PoseOutputContract
+    ↓
+PoseRuntime
+    ↓
+PoseValidator
 ```
 
-***
+---
 
-# 五十一、我建议你把 V1 的范围重新锁死
+## P0-6：外部 YOLOv6/7/9 源码依赖必须去绝对路径
 
-现在 README 写：
+现在：
 
 ```text
-PyTorch / YOLOv10 / Detection
+/home/compose/develop/yolov6
+/home/compose/develop/yolov7
+/home/compose/develop/yolov9
 ```
 
-这是正确的。
-
-但代码实际上已经偷偷扩展到了：
+应该统一变成：
 
 ```text
-YOLOv5
-YOLOv8
-YOLOv9
-YOLO11
-YOLO12
-YOLO26
-PaddleOCR
-PaddleDetection
+ModelSourceResolver
 ```
 
-这会导致维护失控。
-
-建议 V1：
+通过：
 
 ```text
-Framework:
-    PyTorch
-
-Model:
-    YOLOv10
-
-Task:
-    Detection
-
-Shape:
-    Static
-
-Batch:
-    1
-
-Precision:
-    FP32 / FP16
-
-Backend:
-    Kunlun
-
-Postprocess:
-    CPU
-
-Deployment:
-    Docker
+repository
+revision
+local_path
 ```
 
-其他全部：
+确定来源。
+
+---
+
+## P0-7：模型支持状态应该自动检查
+
+现在：
+
+```python
+SUPPORT_TABLE
+```
+
+是人工声明。
+
+应该自动生成：
+
+```text
+Adapter
++
+YAML
++
+OutputContract
++
+Runtime
++
+Test
++
+Backend
+```
+
+只有全部存在：
+
+```text
+stable
+```
+
+否则：
 
 ```text
 experimental
 ```
 
-***
+---
 
-# 五十二、最终我建议把版本规划成这样
+## P0-8：增加“模型级 Conformance Test”
 
-## V1.0
-
-完成：
+例如：
 
 ```text
-YOLOv10
- ↓
-ONNX
- ↓
-Normalize
- ↓
-Capability Check
- ↓
-Kunlun
- ↓
-model.xpu
- ↓
-Accuracy
- ↓
-Docker
-```
-
-***
-
-## V1.1
-
-增加：
-
-```text
-YOLOv8
-YOLOv9
-YOLO11
-```
-
-并完善：
-
-```text
-FP16
-multiple resolutions
-multi-device
-```
-
-***
-
-## V1.2
-
-增加：
-
-```text
-INT8
-calibration
-```
-
-***
-
-## V2.0
-
-增加：
-
-```text
-Paddle
- ↓
-PaddleOCR
- ↓
-PaddleDetection
-```
-
-***
-
-# 五十三、我给当前项目的修改优先级
-
-这是最实际的执行顺序。
-
-## P0：必须先改
-
-### 1
-
-```text
-禁止默认 degraded → Docker
-```
-
-### 2
-
-```text
-真实 Kunlun SDK Adapter 接口
-```
-
-### 3
-
-```text
-Capability Matrix
-```
-
-### 4
-
-```text
-Final Graph Operator Check
-```
-
-### 5
-
-```text
-YOLOv10 Output Contract
-```
-
-### 6
-
-```text
-YOLOv10 checkpoint loading
-```
-
-### 7
-
-```text
-真实 XPU Runtime Adapter
-```
-
-### 8
-
-```text
-三层 Accuracy Validation
-```
-
-***
-
-# 五十四、P1
-
-然后：
-
-```text
-PassManager
-Rollback
-Artifact metadata
-Environment fingerprint
-Source SHA256
-Benchmark hardware fingerprint
-Runtime CPU fallback policy
-Config split
-Manifest split
-```
-
-***
-
-# 五十五、P2
-
-最后：
-
-```text
-Model lifecycle
-Capability database
-CI model zoo
-Docker E2E
-INT8
-Paddle
-OCR
-```
-
-***
-
-# 五十六、我建议你不要马上让我“重写所有代码”
-
-最合理的开发方式是分 **4 个 Commit / Sprint**。
-
-***
-
-## Sprint 1：把“假转换器”变成“严谨转换器”
-
-修改：
-
-```text
-pipeline.py
-backend/base.py
-backend/kunlun/compiler.py
-backend/kunlun/operator_registry.py
-backend/kunlun/config.py
-```
-
-目标：
-
-```text
-没有真实 SDK
-     ↓
-转换失败
-```
-
-而不是：
-
-```text
-生成 fake model.xpu
-```
-
-同时增加：
-
-```text
-Capability
-Preflight
-Final Operator Check
-```
-
-***
-
-# 五十七、Sprint 2：真正把 YOLOv10 打通
-
-重点：
-
-```text
-frontend/pytorch/base.py
-frontend/pytorch/yolov10.py
-contract/output.py
-runtime/detection
-```
-
-做到：
-
-```text
-真实 best.pt
- ↓
-正确恢复 YOLOv10
- ↓
-ONNX
- ↓
-输出 Contract
- ↓
-Raw detection
-```
-
-这里是整个项目最核心的算法部分。
-
-***
-
-# 五十八、Sprint 3：接真实昆仑 SDK
-
-你把实际环境给我：
-
-```text
-Kunlun XPU 型号
-SDK
-XTCL
-Driver
-Firmware
-Python 包
-编译示例
-Runtime 示例
-```
-
-然后实现：
-
-```text
-backend/kunlun/adapters/<actual_sdk>.py
-```
-
-把：
-
-```text
-ONNX
- ↓
-model.xpu
-```
-
-真正落地。
-
-***
-
-# 五十九、Sprint 4：Docker 交付
-
-最后：
-
-```text
-model.xpu
- +
-runtime
- +
-config
- +
-metadata
- +
-Dockerfile
- +
-manifest
- ↓
-yolov10_xxx_dockerimg_v1.0.zip
-```
-
-并做真正：
-
-```text
-docker build
-docker run
-/health
-/predict
-```
-
-E2E。
-
-***
-
-# 六十、最终验收标准
-
-我建议不要以：
-
-> “代码能运行”
-
-作为 V1 完成标准。
-
-而是以这一条作为标准：
-
-```text
-客户 best.pt
-       │
-       ▼
-xpu-converter build
-       │
-       ▼
-yolov10_xxx_dockerimg_v1.0.zip
-       │
-       ▼
-拷贝到昆仑服务器
-       │
-       ▼
-sh build.sh
-       │
-       ▼
-Docker Container
-       │
-       ├── /health       → OK
-       │
-       └── /predict      → 正确检测结果
-```
-
-同时：
-
-```text
+YOLOv10n
+   ↓
+golden input
+   ↓
 PyTorch
-   ≈
+   ↓
 ONNX
-   ≈
+   ↓
+Paddle
+   ↓
 XPU
 ```
 
-满足预先定义的误差阈值，并且：
+每一步保存：
 
 ```text
-XPU latency
-XPU throughput
+tensor hash
+shape
+dtype
+max_abs_error
+cosine_similarity
 ```
 
-是真实硬件数据。
+---
 
-***
+## P0-9：Application-level Accuracy 不能只靠 generic tensor compare
 
-# 六十一、最后给你一个我认为最重要的架构调整
+当前 AccuracyValidator 已经很正确地把 Application Level 独立出来，但默认没有 dataset 时会标记 unavailable。
 
-你现在实际上是：
+下一步应该真正实现：
 
 ```text
-Frontend
-   ↓
+Detection:
+mAP50
+mAP50-95
+Recall
+Precision
+
+Seg:
+mask mAP
+
+Pose:
+OKS AP
+
+OBB:
+OBB mAP
+
+Cls:
+Top-1 / Top-5
+
+Depth:
+AbsRel / RMSE / δ1
+
+Sem:
+mIoU / Pixel Acc
+```
+
+---
+
+## P0-10：Performance 必须绑定硬件指纹
+
+当前 Benchmark 已经禁止模拟后端产生虚假性能数字，这是对的。
+
+应该进一步强制：
+
+```text
+chip
+sdk_version
+driver_version
+firmware_version
+model
+precision
+input_shape
+batch
+warmup
+iterations
+```
+
+全部写入 benchmark artifact。
+
+---
+
+# 十九、最终“真假完成”判断
+
+我把你之前最关心的问题直接给一个非常明确的答案：
+
+### 真完成
+
+```text
+YOLOv10 Detection
+```
+
+它是当前项目真正的：
+
+```text
+Golden Path
+```
+
+因为：
+
+```text
+Adapter
+✓
+YAML
+✓
 ONNX
-   ↓
-Optimizer
-   ↓
-Backend
+✓
+NMS Rewrite
+✓
+Operator Analysis
+✓
+Optimization
+✓
+Paddle-XPU Backend
+✓
+Runtime Session
+✓
+Accuracy Framework
+✓
+Benchmark Framework
+✓
+Docker Export
+✓
+degraded 防护
+✓
+Stable 生命周期
+✓
 ```
 
-我建议最终升级成：
+
+
+---
+
+### 基本真实，但还不能交付
 
 ```text
-                     Model Package
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │ Model Adapter│
-                    └──────┬───────┘
-                           │
-                           ▼
-                    Model Contract
-                           │
-                           ▼
-                       ONNX IR
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-              ▼                         ▼
-        Graph Passes              Capability DB
-              │                         │
-              └────────────┬────────────┘
-                           ▼
-                     Final Graph
-                           │
-                           ▼
-                       Preflight
-                           │
-                    ┌──────┴──────┐
-                    │             │
-                   FAIL          PASS
-                                  │
-                                  ▼
-                         Kunlun Compiler
-                                  │
-                                  ▼
-                            Artifact
-                                  │
-                   ┌──────────────┼──────────────┐
-                   ▼              ▼              ▼
-               Validation     Benchmark       Metadata
-                   │              │              │
-                   └──────────────┼──────────────┘
-                                  ▼
-                           Docker Exporter
-                                  │
-                                  ▼
-                   yolov10_xxx_dockerimg_v1.0.zip
+YOLOv5 Detection
+YOLOv6 Detection
+YOLOv7 Detection
+YOLOv8 Detection
+YOLOv9 Detection
+YOLO11 Detection
+YOLO12 Detection
+YOLO26 Detection
 ```
 
-**这个版本我认为就已经可以作为正式项目的技术基线。**
-
-***
-
-## 现在这份代码我建议不要推倒
-
-目前的：
+原因不是 Adapter 不存在，而是：
 
 ```text
-frontend
-ir
-optimizer
-rewrite
-backend
-validator
-exporter
-runtime
+真实模型回归
++
+XPU 真机验证
++
+Runtime
++
+Application Accuracy
++
+Performance
++
+正式交付
 ```
 
-**全部可以保留。**
+没有全部闭环。
 
-真正需要做的是把三个“危险的假设”拿掉：
+---
+
+### “假完成/过度声明”
+
+尤其是：
 
 ```text
-① 假设有 Kunlun SDK
-② 假设 ONNX 算子白名单就代表 XPU 支持
-③ 假设 YOLO 输出格式可以靠 shape 猜
+YOLOv8 Seg/Pose/OBB/Cls
+YOLOv11 Seg/Pose/OBB/Cls
+YOLOv26 Seg/Pose/OBB/Cls
+YOLOv26 Depth
+YOLOv26 Sem
 ```
 
-然后建立三个核心机制：
+这里的“假”不是说代码完全没写，而是：
+
+> **代码已经表达了“支持这个任务”，但项目后端/Runtime/测试体系还没有足够证据支持“这个任务已经完成”。**
+
+其中：
+
+**YOLO26 Depth / Sem 是最典型的假完成。**
+
+因为 Adapter 基本只有：
+
+```python
+task = "depth"
+```
+
+或：
+
+```python
+task = "sem"
+```
+
+而交付 Runtime 当前仍然是 detection-oriented。
+
+---
+
+# 二十、我建议下一阶段不要继续加模型，而是做这个重构
+
+优先级应该从：
 
 ```text
-Capability
-Contract
-Artifact
+❌ 再增加 YOLO13 / YOLO27 / 更多 Adapter
 ```
 
-这三个东西一旦建立起来，后面的 **YOLOv8 / YOLOv9 / YOLO11 / PaddleOCR / PaddleDetection** 就会变成“增加 Adapter + Capability + Contract”，而不是每增加一个模型就重新写一套转换器。
+切换成：
 
-另外，我这次实际运行了项目测试：当前环境没有安装 `onnx`，所以 26 个测试中有 24 个因依赖缺失直接 ERROR；Python 源码本身可以通过 `py_compile`。这意味着**当前测试失败首先是测试环境依赖问题，但也暴露出测试依赖分层不够完善**。下一版应该把 `onnx/onnxruntime` 集成测试和纯 Python unit test 分开。
+```text
+                         ┌── Detection
+                         ├── Segmentation
+                         ├── Pose
+PT → Adapter → IR → Contract ├── OBB
+                         ├── Classification
+                         ├── Depth
+                         └── Semantic
+                                │
+                                ▼
+                         Rewrite / Optimizer
+                                │
+                                ▼
+                         Kunlun Backend
+                                │
+                         ┌──────┴──────┐
+                         │             │
+                       XPU          CPU/ORT
+                         │             │
+                         └──────┬──────┘
+                                ▼
+                          Task Runtime
+                                │
+                                ▼
+                       Application Validator
+                                │
+                                ▼
+                         Docker Delivery
+```
 
-**下一步最合适的工作不是继续写泛泛的设计文档，而是直接进入代码级改造：我可以按照上面 P0 → P1 的顺序，基于你这份** **`xpu-model-converter.zip`，逐个文件给出“现有代码 → 修改后代码”的具体方案，第一批先改** **`pipeline.py + backend/base.py + Kunlun Backend + operator capability + YOLOv10 Adapter/Output Contract`，并给出可以直接替换进仓库的代码。**
+然后按照：
+
+```text
+Phase 1
+YOLOv10 Detection
+        ↓
+100% Golden Path
+
+Phase 2
+YOLOv8 Detection
+YOLO11 Detection
+YOLOv9 Detection
+
+Phase 3
+YOLOv8 Seg
+YOLOv8 Pose
+YOLOv8 OBB
+YOLOv8 Cls
+
+Phase 4
+YOLOv7/v9 Seg
+YOLOv7 Pose
+
+Phase 5
+YOLO26 多任务
+        ↓
+Depth / Sem 最后做
+```
+
+逐个从：
+
+```text
+experimental
+```
+
+晋级：
+
+```text
+stable
+```
+
+---
+
+## 最关键的一句话
+
+**当前仓库不是“YOLO 转换没做完”，而是“Frontend 模型覆盖已经跑在 Backend/Runtime/Validation 前面了”。**
+
+因此下一步最重要的工程任务不是继续写 Adapter，而是建立：
+
+> **`OutputContract + Task Runtime + Model Conformance Test + Stable Gate`**
+
+这四个东西一旦补上，当前已经写好的大量 YOLO Adapter 才真正有价值。
+
+而且我建议下一步直接动代码：**先以 YOLOv10 Detection 为基准，把现有仓库逐文件改造成一套可复制的 `Model Conformance` 框架，然后把 YOLOv8 Detection 和 YOLO11 Detection 作为第一批从 experimental 晋级 stable 的模型。**这样后面 YOLOv5/6/7/9/12/26 就不需要再靠“写 Adapter + 人工判断”了，而是可以由自动化门禁判断到底是真支持还是假支持。
+
+[1]: https://github.com/WangShaoze/xpu-model-converter "GitHub - WangShaoze/xpu-model-converter: 实现模型转换 · GitHub"
+ 

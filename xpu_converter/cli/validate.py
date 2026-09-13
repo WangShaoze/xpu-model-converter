@@ -68,10 +68,22 @@ def cmd_validate(args) -> int:
     if getattr(args, "benchmark", False):
         session = target_session(backend, artifact, config)
         result = BenchmarkRunner(iterations=int(getattr(args, "iterations", 50) or 50)).run(
-            session, sample=samples[0] if samples else None, device=config.device
+            session,
+            sample=samples[0] if samples else None,
+            device=config.device,
+            hardware=backend.describe() if hasattr(backend, "describe") else {},
+            model=Path(target_path).name,
+            precision=config.precision,
         )
         session.close()
         print_kv("性能基准", dict(result.latency_ms, **{"吞吐(FPS)": result.throughput_fps}))
+        print_kv("硬件指纹", {
+            "chip": result.chip or "(缺失)",
+            "指纹": result.hardware_fingerprint,
+            "可用": result.available,
+            "可信": result.credible,
+            "batch": result.batch,
+        })
         for note in result.notes:
             print("  ! {}".format(note))
 

@@ -7,15 +7,21 @@ Web 用 Redis/DB EventSink 订阅后推送给浏览器。
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
 
 
 @dataclass
 class Event:
     """统一事件 Schema(建议格式 §23)。
 
-    ``{"job_id": ..., "stage": ..., "event": ..., "progress": ..., "message": ...,
-        "timestamp": ...}``
+    ``{"event_id": ..., "job_id": ..., "stage": ..., "event": ..., "progress": ...,
+        "message": ..., "timestamp": ..., "sequence": ...}``
     """
     event: str
     job_id: str = ""
@@ -23,12 +29,18 @@ class Event:
     progress: Optional[int] = None
     message: str = ""
     data: Dict[str, Any] = field(default_factory=dict)
+    event_id: str = field(default_factory=lambda: uuid4().hex)
+    timestamp: str = field(default_factory=_now_iso)
+    sequence: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "event": self.event,
+            "event_id": self.event_id,
             "job_id": self.job_id,
             "stage": self.stage,
+            "timestamp": self.timestamp,
+            "sequence": self.sequence,
             "progress": self.progress,
             "message": self.message,
             "data": dict(self.data),
@@ -81,13 +93,20 @@ class EventSink(ABC):
 
 
 class CollectingEventSink(EventSink):
-    """测试/调试用: 把事件回收到内存列表, 也可顺带打印到控制台。"""
+    """测试/调试用: 把事件回收到内存列表, 也可顺带打印到控制台。
+
+    进入 sink 时按 ``job_id`` 维护严格递增的 ``sequence``(同一 Job 内 1,2,3,...)。
+    """
 
     def __init__(self, echo: bool = False) -> None:
         self.echo = echo
         self.events: List[Event] = []
+        self._sequences: Dict[str, int] = {}
 
     def emit(self, event: Event) -> None:
+        if event.job_id:
+            event.sequence = self._sequences.get(event.job_id, 0) + 1
+            self._sequences[event.job_id] = event.sequence
         if self.echo:
             print(event.to_dict())
         self.events.append(event)
@@ -101,7 +120,7 @@ class ConsoleEventSink(CollectingEventSink):
         self.lines: List[str] = []
 
     def emit(self, event: Event) -> None:
-        self.events.append(event)
+        super().emit(event)  # 先做 sequence 打点
         if event.event in ("log", "stage_progress"):
             return
         prefix = "[{}]".format(event.stage) if event.stage else "[job]"

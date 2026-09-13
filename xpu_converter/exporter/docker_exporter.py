@@ -69,21 +69,35 @@ def artifact_model_filename(model_files: List[Path]) -> str:
 class RuntimePackager:
     """交付产物 ②: 公共 Runtime 代码投放。
 
-    把 ``runtime/common`` 与 ``runtime/<task>`` 平铺到**算法目录**下, 所有模型
-    共用同一套与模型无关的 Runtime(建设目标 §5/§10)。
+    Runtime 是**任务无关**的通用实现(由算法目录下 ``runtime.yaml`` 的 ``output``
+    契约选择解码器, 覆盖 detection/segment/pose/obb/cls/depth/sem), 因此所有任务
+    共用同一份代码(建设目标 §5/§10)。``task`` 仅作语义标签:
+    若确实存在任务专属的 ``runtime/<task>`` 目录则优先使用, 否则回退到通用
+    ``runtime/detection``, 避免多任务模型在 ``package`` 命令下因目录缺失而失败。
     """
+
+    #: 通用 Runtime 实现目录: 未提供任务专属目录时复用
+    GENERIC_RUNTIME_DIR = "detection"
 
     def __init__(self, task: str = DEFAULT_RUNTIME_TASK, version: str = "v1.0") -> None:
         self.task = task or DEFAULT_RUNTIME_TASK
         self.version = version
 
-    def source_dirs(self) -> List[Path]:
+    def runtime_dirs(self) -> List[Path]:
+        """解析本任务使用的 Runtime 实现目录(公共在前, 任务实现在后)。"""
         root = runtime_dir()
-        dirs = [root / RUNTIME_COMMON_DIR, root / self.task]
+        task_dir = root / self.task
+        if not task_dir.is_dir():
+            # 任务专属目录不存在 → 复用通用实现(当前所有任务共用同一套检测 Runtime)
+            task_dir = root / self.GENERIC_RUNTIME_DIR
+        dirs = [root / RUNTIME_COMMON_DIR, task_dir]
         for path in dirs:
             if not path.is_dir():
                 raise PackageError("Runtime 目录不存在: {}".format(path))
         return dirs
+
+    def source_dirs(self) -> List[Path]:
+        return self.runtime_dirs()
 
     def stage(self, target_dir) -> List[str]:
         """把 Runtime 源码平铺到 ``target_dir``, 返回相对文件列表。"""

@@ -84,7 +84,9 @@ xpu_converter/
 ├── optimizer/      # 图优化: shape inference / 常量折叠 / Conv+BN 融合 / 图简化
 ├── rewrite/        # 算子改写: Silu、Mish、Upsample、NMS→CPU
 ├── backend/kunlun/ # 昆仑芯后端(SDK 解耦): operator_registry / graph_builder / compiler / runtime
+├── contract/       # 输出契约(OutputContract + 从 ONNX 探测布局)
 ├── validator/      # 精度校验(tensor_compare/accuracy) 与性能基准(benchmark)
+├── conformance/    # 模型级逐后端一致性校验(指纹 shape/dtype/sha256 + 数值比对, P0-8)
 ├── exporter/       # Docker 交付包导出: template(Jinja2) / manifest / docker_exporter
 ├── registry/       # 模型与后端注册表
 └── pipeline.py     # 10 步端到端流水线

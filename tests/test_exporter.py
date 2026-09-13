@@ -95,6 +95,21 @@ class ExporterTest(unittest.TestCase):
         RuntimePackager(task="detection", version="v1.0").stage(second)
         self.assertEqual(self._fingerprint(first), self._fingerprint(second))
 
+    def test_runtime_falls_back_to_generic_for_non_detection_task(self):
+        """多任务模型(segment 等)无专属 runtime/<task> 目录时, 复用通用检测 Runtime。
+
+        对应 ChatGPT 修改意见 P0-1: Runtime 是任务无关实现, ``task`` 不应绑定目录;
+        否则 ``package`` 命令对 ``task=segment`` 等模型会因目录缺失而抛 PackageError。
+        """
+        generic = self.tmp / "generic"
+        RuntimePackager(task="detection", version="v1.0").stage(generic)
+        seg = self.tmp / "seg"
+        RuntimePackager(task="segment", version="v1.0").stage(seg)
+        self.assertEqual(self._fingerprint(generic), self._fingerprint(seg))
+        # 解析结果应回退到通用实现(不因 runtime/segment 缺失而抛错)
+        packager = RuntimePackager(task="pose", version="v1.0")
+        self.assertTrue(all(path.is_dir() for path in packager.runtime_dirs()))
+
     @staticmethod
     def _fingerprint(directory: Path):
         entries = {}

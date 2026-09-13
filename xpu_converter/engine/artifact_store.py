@@ -7,8 +7,13 @@ Pipeline 不直接 ``shutil.copy`` 落盘——通过 :class:`ArtifactStore` 记
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from re import match as _re_match
 from typing import Dict, List, Optional
+
+
+class InvalidArtifactKey(ValueError):
+    """非法 artifact key(绝对路径 / 路径穿越 / 空 key)。"""
 
 
 class ArtifactStore(ABC):
@@ -48,10 +53,29 @@ class LocalArtifactStore(ArtifactStore):
         self.root.mkdir(parents=True, exist_ok=True)
         self._index: Dict[str, StoredArtifact] = {}
 
+    @staticmethod
+    def _validate_key(key: str) -> str:
+        """校验并归一化 key: 允许层级路径, 拒绝穿越 / 绝对路径 / 空 key。"""
+        if not key or not isinstance(key, str):
+            raise InvalidArtifactKey("artifact key 不能为空")
+        if "\x00" in key:
+            raise InvalidArtifactKey("artifact key 含 NUL 字节: {!r}".format(key))
+        normalized = key.replace("\\", "/")
+        # Windows 盘符 / 根路径也按绝对路径拒绝
+        if normalized.startswith("/") or _re_match(r"^[A-Za-z]:", normalized):
+            raise InvalidArtifactKey("绝对路径 key 不允许: {}".format(key))
+        pure = PurePosixPath(normalized)
+        if not pure.parts or pure.name == "" and len(pure.parts) == 1:
+            raise InvalidArtifactKey("空 key 不允许")
+        if any(part in ("..", ".") for part in pure.parts):
+            raise InvalidArtifactKey("路径穿越 key 不允许: {}".format(key))
+        if pure.is_absolute():
+            raise InvalidArtifactKey("绝对路径 key 不允许: {}".format(key))
+        return pure.as_posix()
+
     def _resolve(self, key: str) -> Path:
-        # 防目录穿越: key 只允许一层文件名
-        name = Path(key).name
-        return self.root / name
+        safe = self._validate_key(key)
+        return self.root.joinpath(*safe.split("/"))
 
     def put(self, key: str, source_path: str) -> str:
         import shutil
@@ -60,6 +84,7 @@ class LocalArtifactStore(ArtifactStore):
         if not source.is_file():
             raise FileNotFoundError("产物不存在: {}".format(source))
         target = self._resolve(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(str(source), str(target))
         digest = sha256_of(str(target))
         self._index[key] = StoredArtifact(

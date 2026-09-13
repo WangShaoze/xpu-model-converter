@@ -8,6 +8,8 @@ from xpu_converter.engine import (
     CollectingEventSink,
     ConversionContext,
     ConversionJob,
+    InvalidArtifactKey,
+    InvalidTransitionError,
     JobStage,
     JobStatus,
     LocalArtifactStore,
@@ -87,6 +89,50 @@ class StageStateMachineTest(unittest.TestCase):
         self.assertEqual(job2.status, JobStatus.FAILED)
         self.assertEqual(job2.payload["error_message"], "boom")
 
+    def test_job_illegal_transitions_raise(self):
+        # SUCCESS -> RUNNING / QUEUED 禁止
+        job = ConversionJob(job_id="j1").queue().run().succeed()
+        with self.assertRaises(InvalidTransitionError):
+            job.run()
+        with self.assertRaises(InvalidTransitionError):
+            job.queue()
+        # CANCELLED -> RUNNING 禁止
+        cancelled = ConversionJob(job_id="j2").queue().run().request_cancel().cancel()
+        self.assertEqual(cancelled.status, JobStatus.CANCELLED)
+        with self.assertRaises(InvalidTransitionError):
+            cancelled.run()
+        # CREATED 直接结束 禁止
+        with self.assertRaises(InvalidTransitionError):
+            ConversionJob(job_id="j3").succeed()
+        # 未请求取消直接 CANCELLED 禁止
+        with self.assertRaises(InvalidTransitionError):
+            ConversionJob(job_id="j4").queue().run().cancel()
+
+    def test_job_cancel_flow(self):
+        job = ConversionJob(job_id="j5").queue().run().request_cancel()
+        self.assertEqual(job.status, JobStatus.CANCEL_REQUESTED)
+        job.cancel()
+        self.assertEqual(job.status, JobStatus.CANCELLED)
+        self.assertIsNotNone(job.finished_at)
+
+    def test_stage_illegal_transitions_raise(self):
+        # PENDING 直接结束 禁止
+        with self.assertRaises(InvalidTransitionError):
+            JobStage(name="s1", index=1).finish(StageStatus.SUCCESS)
+        stage = JobStage(name="s2", index=2).start()
+        # RUNNING 二次 start 禁止
+        with self.assertRaises(InvalidTransitionError):
+            stage.start()
+        stage.finish(StageStatus.SUCCESS)
+        # SUCCESS -> FAILED 禁止
+        with self.assertRaises(InvalidTransitionError):
+            stage.finish(StageStatus.FAILED)
+
+    def test_stage_cancel(self):
+        stage = JobStage(name="s3", index=3).start().cancel()
+        self.assertEqual(stage.status, StageStatus.CANCELLED)
+        self.assertEqual(stage.to_dict()["status"], "CANCELLED")
+
 
 class ArtifactStoreTest(unittest.TestCase):
     def test_local_store_roundtrip(self):
@@ -101,6 +147,60 @@ class ArtifactStoreTest(unittest.TestCase):
             self.assertEqual(Path(got).read_text(encoding="utf-8"), "binary-ish")
             store.delete("compile/artifact/model.onnx")
             self.assertFalse(store.exists("compile/artifact/model.onnx"))
+
+    def test_nested_key_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(str(Path(tmp) / "store"))
+            source = Path(tmp) / "model.pt"
+            source.write_text("weights")
+            key = "jobs/job_1/stages/03-onnx/model.onnx"
+            store.put(key, str(source))
+            # 层级保留, 而不是 Path(key).name 扁平化
+            self.assertTrue((Path(tmp) / "store" / "jobs" / "job_1" / "stages" / "03-onnx" / "model.onnx").is_file())
+            self.assertEqual(Path(store.get(key)).name, "model.onnx")
+            # list 记录完整 key
+            self.assertEqual([a.key for a in store.list()], [key])
+
+    def test_traversal_and_absolute_keys_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LocalArtifactStore(str(Path(tmp) / "store"))
+            source = Path(tmp) / "ok.txt"
+            source.write_text("x")
+            for bad in ("../evil", "a/../../evil", "/etc/passwd", "C:/windows", "a/.."):
+                with self.assertRaises(InvalidArtifactKey, msg=bad):
+                    store.put(bad, str(source))
+                with self.assertRaises(InvalidArtifactKey, msg=bad):
+                    store.get(bad)
+            # 穿越 key 不得写出 store 目录之外
+            self.assertFalse((Path(tmp) / "evil").exists())
+
+
+class EventMetadataTest(unittest.TestCase):
+    def test_event_has_id_timestamp_sequence(self):
+        ev = stage_finished("job_1", "compile", "SUCCESS")
+        self.assertTrue(ev.event_id)
+        self.assertTrue(ev.timestamp)
+        self.assertIn("event_id", ev.to_dict())
+        self.assertIn("timestamp", ev.to_dict())
+        self.assertIn("sequence", ev.to_dict())
+
+    def test_sequence_strictly_increasing_per_job(self):
+        sink = CollectingEventSink()
+        for i in range(5):
+            sink.emit(stage_finished("job_a", "s{}".format(i), "SUCCESS"))
+        for i in range(2):
+            sink.emit(stage_finished("job_b", "s{}".format(i), "SUCCESS"))
+        seq_a = [e.sequence for e in sink.events if e.job_id == "job_a"]
+        seq_b = [e.sequence for e in sink.events if e.job_id == "job_b"]
+        self.assertEqual(seq_a, [1, 2, 3, 4, 5])
+        self.assertEqual(seq_b, [1, 2])
+
+    def test_console_sink_stamps_sequence(self):
+        from xpu_converter.engine import ConsoleEventSink
+        sink = ConsoleEventSink()
+        sink.emit(stage_finished("job_1", "compile", "SUCCESS"))
+        sink.emit(job_finished("job_1", "SUCCESS"))
+        self.assertEqual([e.sequence for e in sink.events], [1, 2])
 
 
 class ContextTest(unittest.TestCase):

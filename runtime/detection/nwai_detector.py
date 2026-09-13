@@ -51,6 +51,7 @@ class Detector:
         self.max_det = settings.MAX_DET
         self.num_classes = settings.NUM_CLASSES
         self.layout = settings.OUTPUT_LAYOUT
+        self.task = str(settings.TASK or "detection").lower()
         # 输出契约驱动解码器选择; 契约缺失或 layout 不可识别时显式报错(不静默猜测)
         self.decoder = DecoderFactory.create(
             settings.OUTPUT_CONTRACT, num_classes=self.num_classes
@@ -99,6 +100,110 @@ class Detector:
             iou_thres=iou_thres if iou_thres is not None else self.iou_thres,
         )
         return detections
+
+    def predict(self, image_bgr: np.ndarray, conf_thres: Optional[float] = None,
+                iou_thres: Optional[float] = None):
+        """任务无关的推理入口: detection 返回检测列表, 其余任务返回 :class:`TaskObjects`。
+
+        按 ``decoder.layout`` 而非 ``task`` 分派, 以便 depth/sem 等任务(布局同为
+        ``dense``)正确进入任务后处理; 仅写出契约声明了受支持的任务布局时走任务路径。
+        """
+        if self.decoder.layout in ("segment", "pose", "obb", "cls", "dense"):
+            return self._predict_task(image_bgr, conf_thres, iou_thres)
+        return self.detect(image_bgr, conf_thres=conf_thres, iou_thres=iou_thres)
+
+    def _predict_task(self, image_bgr, conf_thres, iou_thres):
+        height, width = image_bgr.shape[:2]
+        tensor, ratio, pad = self.preprocess(image_bgr)
+        outputs = self.inference(tensor)
+        conf = conf_thres if conf_thres is not None else self.conf_thres
+        result = self.decoder.decode(outputs, conf)
+        if result is None:
+            return None
+        if self.decoder.layout == "cls":
+            return self._finalize_cls(result)
+        if self.decoder.layout == "dense":
+            return self._finalize_dense(result, ratio, pad, (width, height))
+        return self._finalize_objects(
+            result, ratio, pad, (width, height),
+            iou_thres if iou_thres is not None else self.iou_thres,
+        )
+
+    # ------------------------------------------------------------------ 任务后处理
+    def _remap_to_orig(self, boxes, ratio, pad, original_shape):
+        dw, dh = pad
+        width, height = original_shape
+        remapped = boxes.copy()
+        remapped[:, [0, 2]] = (remapped[:, [0, 2]] - dw) / ratio
+        remapped[:, [1, 3]] = (remapped[:, [1, 3]] - dh) / ratio
+        remapped[:, [0, 2]] = remapped[:, [0, 2]].clip(0, width)
+        remapped[:, [1, 3]] = remapped[:, [1, 3]].clip(0, height)
+        return remapped
+
+    def _finalize_objects(self, result, ratio, pad, original_shape, iou_thres):
+        """对分割/姿态/旋转框做 NMS 并对齐附加数据, 返回原图坐标的 TaskObjects。"""
+        from nwai_decoders import TaskObjects
+
+        if result.empty:
+            return result
+        keep = self._nms(result.boxes, result.scores, result.class_ids, iou_thres)
+        if keep.size > self.max_det:
+            keep = keep[: self.max_det]
+        boxes = self._remap_to_orig(result.boxes[keep], ratio, pad, original_shape)
+
+        obj = TaskObjects(
+            boxes=boxes,
+            scores=result.scores[keep],
+            class_ids=result.class_ids[keep],
+        )
+        if result.keypoints is not None:
+            kpts = result.keypoints[keep].copy()  # (nn, K, 3) letterbox coords
+            dw, dh = pad
+            kpts[:, :, 0] = (kpts[:, :, 0] - dw) / ratio
+            kpts[:, :, 1] = (kpts[:, :, 1] - dh) / ratio
+            obj.keypoints = kpts
+        if result.angles is not None:
+            obj.angles = result.angles[keep]
+        if result.mask is not None:
+            proto, coeffs = result.mask
+            obj.mask = self._recover_masks(proto, coeffs[keep], keep, box_src=result.boxes[keep])
+        return obj
+
+    @staticmethod
+    def _recover_masks(proto, coeffs, keep, box_src):
+        """proto @ coeffs → sigmoid → 缩放到(letterbox)框尺寸 → 二值实例掩膜。"""
+        import cv2
+
+        proto = np.asarray(proto, np.float32)
+        coeffs = np.asarray(coeffs, np.float32)  # (nn, nm)
+        masks = []
+        mh, mw = proto.shape[-2], proto.shape[-1]
+        flat = proto.reshape(proto.shape[0], -1)  # (nm, mh*mw)
+        for i in range(coeffs.shape[0]):
+            mask_map = 1.0 / (1.0 + np.exp(-(flat.T @ coeffs[i])).reshape(mh, mw))  # sigmoid
+            x1, y1, x2, y2 = box_src[i].astype(int)
+            w, h = max(1, x2 - x1), max(1, y2 - y1)
+            resized = cv2.resize(mask_map, (w, h), interpolation=cv2.INTER_LINEAR)
+            binary = np.where(resized >= 0.5, 255.0, 0.0).astype(np.uint8)
+            masks.append(binary)
+        return masks if masks else None
+
+    def _finalize_cls(self, result):
+        return result  # TaskObjects(topk_scores/topk_class_ids)
+
+    def _finalize_dense(self, result, ratio, pad, original_shape):
+        if result.dense is None:
+            return result
+        dense = np.asarray(result.dense, np.float32)
+        if dense.ndim == 3:  # (C,H,W)
+            dense = dense[0]
+        # 原图尺寸还原
+        import cv2
+
+        height, width = original_shape
+        if dense.shape[-2:] != (height, width):
+            dense = cv2.resize(dense, (width, height), interpolation=cv2.INTER_NEAREST)
+        return dense
 
     # ------------------------------------------------------------------ 后处理
     def decode_and_nms(self, outputs: List[np.ndarray], ratio: float, pad: Tuple[float, float],
@@ -186,6 +291,12 @@ def get_detector() -> Detector:
 def detect(image_bgr: np.ndarray, conf_thres: Optional[float] = None,
            iou_thres: Optional[float] = None) -> List[Detection]:
     return get_detector().detect(image_bgr, conf_thres=conf_thres, iou_thres=iou_thres)
+
+
+def predict(image_bgr: np.ndarray, conf_thres: Optional[float] = None,
+            iou_thres: Optional[float] = None):
+    """任务无关推理: detection→检测列表; segment/pose/obb→TaskObjects; cls→topk; dense→图。"""
+    return get_detector().predict(image_bgr, conf_thres=conf_thres, iou_thres=iou_thres)
 
 
 def describe() -> Dict[str, Any]:

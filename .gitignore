@@ -10,6 +10,9 @@ __pycache__/
 # 转换产物 / 交付包
 dist/
 output/
+output_seg/
+t_obb/
+t_pose/
 build/
 *.xpu
 

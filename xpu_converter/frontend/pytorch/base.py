@@ -87,14 +87,39 @@ def install_torchvision_stub() -> None:
     real.datasets = datasets
 
     transforms = types.ModuleType("torchvision.transforms")
+    transforms_sub = types.ModuleType("torchvision.transforms.transforms")
+    # 旧版 torchvision 把转换类定义在 ``torchvision.transforms.transforms`` 子包, yolov8-cls
+    # checkpoint 反序列化按此路径取 ``Compose`` 等类; 新版才从父包 ``torchvision.transforms``
+    # 取, 因此两类名须挂到两个模块上。
     for _name in ("Compose", "ToTensor", "Normalize", "Resize", "CenterCrop",
-                  "RandomCrop", "RandomHorizontalFlip", "RandomAffine", "Grayscale"):
-        setattr(transforms, _name, list if _name == "Compose" else type(_name, (), {}))
+                  "RandomCrop", "RandomHorizontalFlip", "RandomAffine", "Grayscale",
+                  "PILToTensor", "ConvertImageDtype", "Pad", "ResizedCrop", "RandomCrop"):
+        _cls = type(_name, (), {})
+        setattr(transforms, _name, _cls)
+        setattr(transforms_sub, _name, _cls)
+    transforms.transforms = transforms_sub
     real.transforms = transforms
 
     functional = types.ModuleType("torchvision.transforms.functional")
-    for _name in ("to_tensor", "resize", "normalize", "hflip", "vflip", "affine", "rgb_to_grayscale"):
-        setattr(functional, _name, lambda *a, **k: a[0] if a else None)
+    # yolov8-cls 等 checkpoint 反序列化会从 ``torchvision.transforms.functional`` 取
+    # ``InterpolationMode`` 等符号(旧版 torchvision 路径), 这里提供足量占位。
+    _interp = type("InterpolationMode", (), {
+        "NEAREST": 0, "NEAREST_EXACT": 0, "BILINEAR": 1, "BICUBIC": 2,
+        "BOX": 3, "HAMMING": 4, "LANCZOS": 5, "__members__": {},
+    })
+    functional.InterpolationMode = _interp
+    for _name, _default in (
+            ("to_tensor", None), ("resize", None), ("resized_crop", None),
+            ("pad", None), ("crop", None), ("center_crop", None),
+            ("normalize", None), ("adjust_brightness", None), ("adjust_contrast", None),
+            ("adjust_saturation", None), ("adjust_hue", None), ("adjust_gamma", None),
+            ("rotate", None), ("affine", None), ("hflip", None), ("vflip", None),
+            ("rgb_to_grayscale", None), ("pil_to_tensor", None), ("to_grayscale", None),
+            ("gaussian_blur", None), ("invert", None), ("equalize", None),
+            ("autocontrast", None), ("get_dimensions", None), ("get_image_size", None),
+            ("get_image_num_channels", None), ("to_pil_image", None), ("to_grayscale", None)):
+        if not hasattr(functional, _name):
+            setattr(functional, _name, lambda *a, **k: a[0] if a else None)
     real.transforms.functional = functional
 
     models_mod = types.ModuleType("torchvision.models")
@@ -107,7 +132,7 @@ def install_torchvision_stub() -> None:
     real.utils = utils
 
     setattr(real, _TORCHVISION_STUB_FLAG, True)
-    for _mod in (real, ops, datasets, transforms, functional, models_mod, utils):
+    for _mod in (real, ops, datasets, transforms, transforms_sub, functional, models_mod, utils):
         sys.modules.setdefault(_mod.__name__, _mod)
     # 顶层模块的注册顺序要在子模块之后, 确保属性已挂载
     sys.modules["torchvision"] = real
@@ -199,8 +224,19 @@ class PyTorchAdapter(BaseModelAdapter):
     # ------------------------------------------------------------- 加载识别
     def load_model(self, model_path: str) -> Any:
         self._prepare_import_env()
-        torch = require_torch()
         path = self._require_file(model_path)
+        # ultralytics 权重优先走 ``YOLO(path)`` 重建: 某些 checkpoint 反序列化会依赖
+        # torchvision 的 C++ 算子(如 yolov8-cls 的 ``torchvision::nms``), torch.load
+        # 在 ABI 不匹配时直接报 ``operator xxx does not exist``; YOLO() 会按 task 重建
+        # 结构, 规避该问题(与导出路径 ``_export_via_ultralytics`` 保持一致)。
+        if self.ultralytics_name and ultralytics_available():
+            try:
+                loaded = self._load_via_ultralytics(path)
+                if loaded is not None:
+                    return loaded
+            except Exception as err:
+                logger.warning("ultralytics 加载 %s 失败, 回退 torch.load: %s", path, err)
+        torch = require_torch()
         obj = self._torch_load(torch, path)
         return self._extract_module(torch, obj, path)
 
@@ -215,11 +251,17 @@ class PyTorchAdapter(BaseModelAdapter):
 
     # -------------------------------------------------- thuyngch 系加载前置
     def _prepare_import_env(self) -> None:
-        """反序列化 checkpoint 前准备好 import 环境(thuyngch 系专用)。"""
+        """反序列化 checkpoint 前准备好 import 环境。
+
+        thuyngch 系需把作者仓库加入 sys.path; 无论是否为 thuyngch 系, 都尝试注入
+        torchvision 占位: 仅当真库因 ABI 不匹配而无法 import 时(如 checkpoint 引用
+        ``torchvision::nms`` 自定义算子导致 ImportError/RuntimeError)才会注入,
+        ipython 环境真实 torchvision 可用时不做改动(幂等)。yolov8-cls 等权重在
+        torch.load 反序列化时会 import torchvision, 若缺少此兜底会直接崩溃。
+        """
         if self.model_source_root:
             prepend_model_source_root(self.model_source_root)
-        if self.requires_torchvision_stub:
-            install_torchvision_stub()
+        install_torchvision_stub()
 
     @staticmethod
     def set_export_flag(module: Any, value: bool = True) -> None:
@@ -358,6 +400,10 @@ class PyTorchAdapter(BaseModelAdapter):
     def _export_via_ultralytics(self, path, output_path, shape, opset, dynamic) -> str:
         from ultralytics import YOLO
 
+        # 反序列化 checkpoint 可能触发 ``import torchvision``(如 yolov8-cls 引
+        # ``torchvision::nms`` 自定义算子 / ``torchvision.transforms.transforms``),
+        # 在 ABI 不匹配时需先注入占位, 否则 YOLO(path) 直接崩溃。
+        self._prepare_import_env()
         model = YOLO(path)
         imgsz = [int(shape[2]), int(shape[3])]
         exported = model.export(

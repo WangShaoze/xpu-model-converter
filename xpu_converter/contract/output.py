@@ -17,6 +17,11 @@ layout       含义
 ``bnc``      单输出 ``(B, N, 4|5+nc)``
 ``bnc6``     单输出 ``(B, N, 6)``: ``[x1, y1, x2, y2, conf, cls]`` (端到端)
 ``pair``     双输出 ``[boxes(B,N,4) xyxy, scores(B,N,nc)]``, NMS 已剥离
+``segment``  实例分割: det 分支 ``(B, 4+nc+nm, N)`` + proto ``(B, nm, H/4, W/4)``
+``pose``     姿态: det 分支 ``(B, 4+nc+K*3, N)``, 关键点 x/y/conf
+``obb``      旋转框: det 分支 ``(B, 4+nc, N)``, rbox(cx,cy,长边,短边,角度)
+``cls``      分类: ``(B, nc)`` 类别概率, 无框
+``dense``    逐像素图: ``(B, C, H, W)`` (depth=深度, sem=类别索引)
 ===========  ==========================================================
 """
 from dataclasses import dataclass, field
@@ -26,11 +31,17 @@ LAYOUT_BCN = "bcn"
 LAYOUT_BNC = "bnc"
 LAYOUT_BNC6 = "bnc6"
 LAYOUT_PAIR = "pair"
+LAYOUT_SEGMENT = "segment"
+LAYOUT_POSE = "pose"
+LAYOUT_OBB = "obb"
+LAYOUT_CLS = "cls"
+LAYOUT_DENSE = "dense"
 LAYOUT_UNKNOWN = "unknown"
 
 # 端到端(图内已含 NMS)产出的列格式
 FORMAT_XYXY = "xyxy"
 FORMAT_CXCYWH = "cxcywh"
+FORMAT_RBOX = "rbox"
 
 SCORE_CLASS = "class"                    # 只有类别置信度
 SCORE_OBJECTNESS_CLASS = "objectness_class"
@@ -110,10 +121,14 @@ class ModelOutputContract:
     """从实际 ONNX 图探测输出契约。"""
 
     @staticmethod
-    def detect(graph, num_classes: int = 0,
+    def detect(graph, num_classes: int = 0, task: str = "detection",
                declared: Optional[Dict[str, Any]] = None) -> OutputContract:
-        """探测输出契约; 若 model.yaml 显式声明了 ``output``, 以声明为准。"""
-        detected = _detect(graph, num_classes)
+        """探测输出契约; 若 model.yaml 显式声明了 ``output``, 以声明为准。
+
+        ``task`` 取自 model.yaml 的 ``task`` 字段; 非 detection 任务按任务推断输出
+        布局(segment/pose/obb/cls/dense), 避免误判为检测 bnc/bcn。
+        """
+        detected = _detect_for_task(graph, num_classes=num_classes, task=str(task or "detection"))
         if declared:
             merged = detected.to_dict()
             merged.update({k: v for k, v in declared.items() if v is not None})
@@ -121,6 +136,29 @@ class ModelOutputContract:
             merged["num_classes"] = int(declared.get("num_classes") or detected.num_classes or num_classes)
             return OutputContract.from_dict(merged)
         return detected
+
+
+def _detect_for_task(graph, num_classes: int, task: str) -> OutputContract:
+    """按任务分派探测: detection 走通用检测布局, 其余按任务语义确定 layout/type。"""
+    contract = _detect(graph, num_classes)
+    task = (task or "detection").lower()
+    contract.type = task
+
+    # 除 detection 外的任务, 布局与语义完全由任务决定(不依赖 shape 启发式)
+    if task == "segment":
+        contract.layout = LAYOUT_SEGMENT
+    elif task == "pose":
+        contract.layout = LAYOUT_POSE
+        contract.class_axis = 1
+    elif task == "obb":
+        contract.layout = LAYOUT_OBB
+        contract.format = FORMAT_RBOX
+        contract.class_axis = 1
+    elif task == "cls":
+        contract.layout = LAYOUT_CLS
+    elif task in ("depth", "sem"):
+        contract.layout = LAYOUT_DENSE
+    return contract
 
 
 def _detect(graph, num_classes: int) -> OutputContract:

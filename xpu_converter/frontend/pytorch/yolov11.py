@@ -12,3 +12,25 @@ class YOLOv11Adapter(PyTorchAdapter):
 
     def default_input_shape(self):
         return [1, 3, 640, 640]
+
+
+# ---- YOLO11 多任务变体 ----
+class YOLOv11SegAdapter(YOLOv11Adapter):
+    model_type = "yolov11-seg"
+    task = "segment"
+
+
+class YOLOv11PoseAdapter(YOLOv11Adapter):
+    model_type = "yolov11-pose"
+    task = "pose"
+
+
+class YOLOv11ObbAdapter(YOLOv11Adapter):
+    model_type = "yolov11-obb"
+    task = "obb"
+
+
+class YOLOv11ClsAdapter(YOLOv11Adapter):
+    model_type = "yolov11-cls"
+    task = "cls"
+    default_topk = 5

@@ -303,13 +303,12 @@ def _sanitize_onnx_for_x2paddle(onnx_path: str, workdir: Path) -> str:
     initializers = {tensor.name: tensor for tensor in model.graph.initializer}
     changed = 0
 
-    # 2. ``Resize`` 的 [X, "", "", sizes] 写法会让 X2Paddle 1.6.0 在构造
-    #    ``node.inputs`` 时跳过空占位 scale, 随后 ``get_input_node(idx=3)``
-    #    越界报 ``IndexError``。这里统一重写为 opset-10 的两输入形式
-    #    ``[X, scales]``, 常量 scale 由静态 sizes / 输入形状推导。
+    # 2. ``Resize`` 统一重写为 3 输入 ``[X, "", scales]``(scales 在 idx=2):
+    #    同时满足 X2Paddle 的**算子映射**(走 len==3 分支)与**shape 推理**(opset>10
+    #    只认 idx=2 的 scales), 避免 Resize 输出被推理为动态维后级联破坏
+    #    ConvTranspose 等需静态输入维的算子。常量 scale 由静态 sizes / 输入形状推导。
     for node in model.graph.node:
-        if node.op_type == "Resize" and any(i == "" for i in node.input):
-            _rewrite_resize_in_place(model, node, initializers)
+        if node.op_type == "Resize" and _rewrite_resize_in_place(model, node, initializers):
             changed += 1
 
     for node in model.graph.node:
@@ -371,44 +370,57 @@ def _static_shape(model: Any, name: str) -> List[int]:
 
 
 def _rewrite_resize_in_place(model: Any, node: Any, initializers: Dict[str, Any]) -> None:
-    """把 [X, "", "", sizes] 形式的 ``Resize`` 重写为 opset-10 两输入 [X, scales]。
+    """统一把 ``Resize`` 重写为 opset>10 兼容的 3 输入 ``[X, "", scales]`` 常量形式。
 
-    X2Paddle 1.6.0 解析 4 输入 Resize 时会跳过空占位 scale(``build_connection``
-    里 ``in_node == ''`` 直接 ``continue``), 导致 ``node.inputs`` 里实际下标右移,
-    随后 ``_interpolate`` 用 ``get_input_node(idx=3)`` 取 sizes 时 ``IndexError``。
-    这里把 scale 固化为常量并收敛为两输入, 走 x2paddle 的 ``len(input) == 2`` 分支。
+    背景: X2Paddle 1.6.0 对 Resize 有两套不兼容的读取约定——
+    - **算子映射**只看 ``len(node.input)``: ``==2`` 时读 idx=1 的 scale,
+      ``==4`` 时读 idx=3 的 sizes;
+    - **其内部 shape 推理**(opset>10)只认 idx=2 的 scales / idx=3 的 sizes,
+      对 ``[X, scales]``(scales 在 idx=1)会退化为**动态维**(``dim_param``)。
+
+    而 yolov8-seg 的 proto 分支有 ``ConvTranspose``, 其输入必须是 4 维静态 shape,
+    一旦 Resize 输出被推理成动态维, 就级联触发 ``val_x.out_shapes[0][2]`` 越界。
+
+    这里把带常量 scale 的 Resize 统一写成 ``[X, "", scales]``:
+    - 算子映射走 ``len==3`` 分支读 idx=2 的 scale;
+    - shape 推理读 idx=2 的 scale 得到静态输出维。
     """
     import onnx
 
-    if len(node.input) not in (3, 4):
-        return
+    if not hasattr(node, "op_type") or node.op_type != "Resize":
+        return False
     x_name = node.input[0]
-    sizes_name = node.input[3] if len(node.input) == 4 else None
-    scales_name = next(
-        (i for i in (node.input[2] if len(node.input) >= 3 else None, node.input[1]) if i), None
-    )
 
     scale_val: Optional[List[float]] = None
-    if sizes_name and sizes_name in initializers:
-        sizes = [float(v) for v in onnx.numpy_helper.to_array(initializers[sizes_name]).tolist()]
-        x_shape = _static_shape(model, x_name)
-        if len(x_shape) == 4 and x_shape[2] > 0 and x_shape[3] > 0:
-            scale_val = [1.0, 1.0, sizes[2] / x_shape[2], sizes[3] / x_shape[3]]
-    if scale_val is None and scales_name and scales_name in initializers:
-        arr = [float(v) for v in onnx.numpy_helper.to_array(initializers[scales_name]).tolist()]
-        if len(arr) == 4:
-            scale_val = arr
+    # 1) 直接在输入里找常量 scale(X2Paddle 版 2/3 输入的写法)
+    for idx in range(1, len(node.input)):
+        name = node.input[idx]
+        if name and name in initializers:
+            arr = onnx.numpy_helper.to_array(initializers[name]).reshape(-1)
+            if arr.size == 4:
+                scale_val = [float(v) for v in arr.tolist()]
+                break
+    # 2) 由常量 sizes 与静态输入形状推导 scale
     if scale_val is None:
-        return
+        for idx in range(1, len(node.input)):
+            name = node.input[idx]
+            if name and name in initializers:
+                sizes = [float(v) for v in onnx.numpy_helper.to_array(initializers[name]).reshape(-1).tolist()]
+                x_shape = _static_shape(model, x_name)
+                if len(sizes) == 4 and len(x_shape) == 4 and x_shape[2] > 0 and x_shape[3] > 0:
+                    scale_val = [1.0, 1.0, sizes[2] / x_shape[2], sizes[3] / x_shape[3]]
+                break
+    if scale_val is None:
+        return False
 
-    scale_name = (node.name + "_scales").replace("/", "_")
-    const = onnx.helper.make_tensor(
-        scale_name, onnx.TensorProto.FLOAT, [4], scale_val
-    )
-    model.graph.initializer.append(const)
-    initializers[scale_name] = const
+    scale_name = (node.name or "Resize") + "_scales"
+    if scale_name not in initializers:
+        const = onnx.helper.make_tensor(scale_name, onnx.TensorProto.FLOAT, [4], scale_val)
+        model.graph.initializer.append(const)
+        initializers[scale_name] = const
     del node.input[:]
-    node.input.extend([x_name, scale_name])
+    node.input.extend([x_name, "", scale_name])
+    return True
 
 
 def _has_attribute(node, name: str) -> bool:

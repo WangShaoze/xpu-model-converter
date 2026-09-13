@@ -87,6 +87,9 @@ operators:
   Mean: {}
   Mod: {}
   CumSum: {}
+  # 旋转框(obb)rbox 角度解码固有算子; Paddle 在 CPU/XPU 均支持
+  Cos: {dtypes: [float32, float16]}
+  Sin: {dtypes: [float32, float16]}
 
   # ---- 逻辑 / 比较 ----
   Equal: {}

@@ -22,7 +22,7 @@ from flask import Flask, request, send_file
 
 import nwai_logging
 import nwai_settings as settings
-from nwai_detector import detect
+from nwai_detector import predict as _model_predict
 from nwai_tools import (RETURN_CODE_INTERNAL_ERROR, RETURN_CODE_OK, RETURN_CODE_PARAM_ERROR,
                         ExceptionMessage, GetResultInfo, Jsonify, LogDetailFormat, WriteLog)
 from nwai_utils import NwaiUtils, result_image_path
@@ -155,8 +155,8 @@ def predict():
 
     try:
         conf, iou = _resolve_thresholds(params)
-        raw = detect(image, conf_thres=conf, iou_thres=iou)
-        data = _UTILS.dest_to_outputformat(raw)
+        raw = _model_predict(image, conf_thres=conf, iou_thres=iou)
+        data = _UTILS.predict_to_outputformat(raw, task=settings.TASK)
         if isinstance(data, Exception):
             return _respond(GetResultInfo(task_id=task_id, code=RETURN_CODE_INTERNAL_ERROR,
                                           message=str(data), data=None, **_algorithm_fields()))
@@ -185,8 +185,8 @@ def predict_image():
                                       message=err_message, data=None, **_algorithm_fields()))
     try:
         conf, iou = _resolve_thresholds(params)
-        raw = detect(image, conf_thres=conf, iou_thres=iou)
-        data = _UTILS.dest_to_outputformat(raw)
+        raw = _model_predict(image, conf_thres=conf, iou_thres=iou)
+        data = _UTILS.predict_to_outputformat(raw, task=settings.TASK)
         if isinstance(data, Exception):
             return _respond(GetResultInfo(task_id=task_id, code=RETURN_CODE_INTERNAL_ERROR,
                                           message=str(data), data=None, **_algorithm_fields()))
@@ -255,7 +255,11 @@ def _persist_images(image, data, task_id):
         original_path = os.path.join(settings.RESULT_DIR, "{}_src.jpg".format(task_id))
         result_path = os.path.join(settings.RESULT_DIR, "{}_result.jpg".format(task_id))
         cv2.imwrite(original_path, image)
-        ok, err = _UTILS.draw_detections(image, list(data or []), result_path)
+        task = str(settings.TASK or "detection").lower()
+        if task in ("segment", "pose", "obb"):
+            ok, err = _UTILS.draw_task(image, list(data or []), task, result_path)
+        else:
+            ok, err = _UTILS.draw_detections(image, list(data or []), result_path)
         if not ok:
             _log("draw detections failed: {}".format(err))
             result_path = ""

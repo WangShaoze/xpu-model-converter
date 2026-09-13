@@ -349,7 +349,8 @@ class ConversionPipeline:
         # NMS 剥离等改写误导。结果写回 adapter.config, 由导出器落到 runtime.yaml /
         # metadata.json, Runtime 据此选择解码器, 不再用 shape 启发式。
         detected = ModelOutputContract.detect(
-            self.graph, num_classes=int(self.adapter.config.num_classes or 0)
+            self.graph, num_classes=int(self.adapter.config.num_classes or 0),
+            task=self.adapter.config.task or "detection",
         )
         self.adapter.config.output = detected.to_dict()
         self.adapter.config.output_layout = detected.layout

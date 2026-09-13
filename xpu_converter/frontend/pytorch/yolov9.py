@@ -33,3 +33,18 @@ class YOLOv9Adapter(PyTorchAdapter):
     def _prepare_for_export(self, model):
         # 置 Detect 头 export=True: 让 forward 直接返回合并后的静态 [1,4+nc,N] 主张量
         self.set_export_flag(model, True)
+
+
+class YOLOv9SegAdapter(YOLOv9Adapter):
+    """YOLOv9 实例分割, 基于 Segment/DSegment/DualDSegment 头。
+
+    ``export=True`` 时 Segment.forward 返回 ``(torch.cat([x, mc], 1), p)`` 双输出:
+      * ``output1``: det+掩膜系数 ``[1, 4+nc+nm, N]``(bcn);
+      * ``output2``: proto ``[1, nm, H/4, W/4]``。
+    与 ``segment`` 输出契约完全对齐, Runtime 的 SegmentDecoder 可直接消费。
+    """
+
+    model_type = "yolov9-seg"
+    task = "segment"
+    # 需要同时导出 det+coeff 与 proto 双输出, 取消检测任务的 raw_output_index 截断
+    raw_output_index = None

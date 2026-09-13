@@ -6,6 +6,14 @@
 - :mod:`xpu_converter.validator.benchmark`      推理性能基准
 """
 from xpu_converter.validator.accuracy import AccuracyReport, AccuracyValidator, load_dataset_inputs
+from xpu_converter.validator.application import (
+    DET_LAYOUTS,
+    decode_detections,
+    detection_evaluator,
+    eval_detections,
+    iou_matrix,
+    nms,
+)
 from xpu_converter.validator.benchmark import BenchmarkResult, BenchmarkRunner
 from xpu_converter.validator.tensor_compare import (
     DEFAULT_ATOL,
@@ -18,6 +26,7 @@ from xpu_converter.validator.tensor_compare import (
 )
 
 __all__ = [
+    "DET_LAYOUTS",
     "AccuracyReport",
     "AccuracyValidator",
     "BenchmarkResult",
@@ -28,6 +37,11 @@ __all__ = [
     "TensorCompareResult",
     "compare_outputs",
     "compare_tensors",
+    "decode_detections",
+    "detection_evaluator",
+    "eval_detections",
+    "iou_matrix",
     "load_dataset_inputs",
+    "nms",
     "summarize",
 ]

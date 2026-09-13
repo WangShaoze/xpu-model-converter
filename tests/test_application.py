@@ -5,11 +5,17 @@ import unittest
 import numpy as np
 
 from xpu_converter.validator.application import (
+    build_evaluator,
+    cls_evaluator,
+    compute_oks,
+    decode_cls,
     decode_detections,
+    decode_pose,
     detection_evaluator,
     eval_detections,
     iou_matrix,
     nms,
+    pose_evaluator,
 )
 
 
@@ -126,6 +132,105 @@ class DecodeTest(unittest.TestCase):
         _, s, l = decode_detections([raw], "bnc6", 80, 0.25, 0.45)
         self.assertEqual(int(l[0]), 2)
         self.assertAlmostEqual(float(s[0]), 0.9, places=5)
+
+
+class ClsEvaluatorTest(unittest.TestCase):
+    def test_decode_cls_top1(self):
+        raw = np.array([[[0.1, 0.2, 0.9, 0.3, 0.4]]], np.float32)  # argmax = 2
+        label, topk, probs = decode_cls([raw], topk=3)
+        self.assertEqual(label, 2)
+        self.assertEqual(int(topk[0]), 2)
+        self.assertAlmostEqual(float(probs.sum()), 1.0, places=5)
+
+    def test_cls_accuracy(self):
+        # 3 样本, 前 2 命中 top-1, 第 3 命中 top-3 但非 top-1
+        def session(i):
+            out = np.zeros(5, np.float32)
+            out[i % 5] = 1.0
+            return FakeSession(out[None, :])
+
+        gts = [{"gt_label": 0}, {"gt_label": 1}, {"gt_label": 2}]
+        samples = [{"images": None}, {"images": None}, {"images": None}]
+        evaluator = cls_evaluator(contract={"layout": "cls"}, ground_truth=gts, topk=3)
+        report = evaluator(reference=None, target=session(0),
+                           samples=samples, num_classes_=5)
+        self.assertTrue(report["available"])
+        self.assertEqual(report["samples"], 3)
+        # target 每次返回 class 0/1/2 最高, 故 top-1 只中 1 个, top-3 中 3 个
+        self.assertAlmostEqual(report["accuracy"], 1.0 / 3, places=4)
+        self.assertAlmostEqual(report["top3_accuracy"], 1.0, places=4)
+
+    def test_cls_missing_gt_unavailable(self):
+        evaluator = cls_evaluator(contract={"layout": "cls"}, ground_truth=[])
+        report = evaluator(None, FakeSession(np.zeros(3, np.float32)[None, :]),
+                           [{"images": None}], 3)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
+
+
+class PoseEvaluatorTest(unittest.TestCase):
+    def _pose_output(self, kp_xy, nc=1, num_kpt=2, conf=0.9):
+        # bnc 行: (N)=1 行, C 列 = [cx,cy,w,h, cls..., kpt_x,kpt_y,kpt_v,...]
+        # 由于 decode_pose 的 bcn/bnc 用「行数<列数则转置」判别, 构造 N>C 的 (N,C) 数组
+        box = np.array([50.0, 50.0, 100.0, 100.0], np.float32)  # cxcywh
+        cls_part = np.full(nc, 0.0, np.float32)
+        xs = np.asarray(kp_xy, np.float32)[:, 0]
+        ys = np.asarray(kp_xy, np.float32)[:, 1]
+        vis = np.ones(num_kpt, np.float32)
+        kpt_part = np.stack([xs, ys, vis], axis=1).flatten()
+        row = np.concatenate([box, cls_part, kpt_part]).astype(np.float32)
+        row[4] = conf  # no-obj 布局下 cls 从 col4 开始, 置最高置信度
+        # 复制到 N>C 行, 满足行优先判别
+        return np.tile(row, (12, 1))
+
+    def test_decode_pose(self):
+        arr = self._pose_output([[50.0, 50.0], [60.0, 60.0]], nc=1, num_kpt=2)
+        decoded = decode_pose([arr], num_classes=1)
+        self.assertIsNotNone(decoded)
+        box, score, kpts = decoded
+        self.assertEqual(kpts.shape, (2, 3))
+        self.assertEqual(int(box[0]), 0)  # cx-w/2 = 50 - 50 = 0
+        self.assertGreater(score, 0.0)
+
+    def test_oks_exact_is_one(self):
+        gt = np.array([[50.0, 50.0, 1.0], [60.0, 60.0, 1.0]], np.float32)
+        self.assertAlmostEqual(compute_oks(gt.copy(), gt, gt_scale=50.0), 1.0, places=5)
+
+    def _oks(self, gt, num_kpt=2, nc=1):
+        kp_xy = gt[:, :2]
+        arr = self._pose_output(kp_xy, nc=nc, num_kpt=num_kpt)
+        evaluator = pose_evaluator(contract={"layout": "pose", "num_classes": nc},
+                                   ground_truth=[{"gt_keypoints": gt, "gt_scale": 50.0}])
+        return evaluator(None, FakeSession([arr]), [{"images": None}], num_classes_=nc)
+
+    def test_pose_perfect_match_oks1(self):
+        gt = np.array([[50.0, 50.0, 1.0], [60.0, 60.0, 1.0]], np.float32)
+        report = self._oks(gt)
+        self.assertTrue(report["available"])
+        self.assertAlmostEqual(report["oks"], 1.0, places=4)
+
+    def test_pose_missing_gt_unavailable(self):
+        evaluator = pose_evaluator(contract={"layout": "pose"}, ground_truth=[])
+        report = evaluator(None, FakeSession([np.zeros((1, 11), np.float32)]),
+                           [{"images": None}], 1)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
+
+
+class BuildEvaluatorTest(unittest.TestCase):
+    def test_build_cls(self):
+        evaluator = build_evaluator("cls", contract={"layout": "cls"})
+        self.assertTrue(callable(evaluator))
+
+    def test_build_pose(self):
+        evaluator = build_evaluator("pose", contract={"layout": "pose"})
+        self.assertTrue(callable(evaluator))
+
+    def test_build_seg_feels_unavailable_without_gt(self):
+        evaluator = build_evaluator("segment", contract={"layout": "segment"}, ground_truth=[])
+        report = evaluator(None, FakeSession(np.zeros((1, 0, 6), np.float32)),
+                           [{"images": None}], 80)
+        self.assertFalse(report["available"])
 
 
 if __name__ == "__main__":

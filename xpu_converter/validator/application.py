@@ -299,3 +299,260 @@ def _map_final(records):
     r = float(np.mean(recalls))
     f1 = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
     return {"precision": p, "recall": r, "f1": f1}
+
+
+# ------------------------------------------------------------------ 多任务应用级指标
+# ChatGPT 意见 P0-9 / §"多任务 Application Validator": 检测之外,分类用 top-1/top-k 精度、
+# 姿态用 OKS(Object Keypoint Similarity)。缺 GT 或无法解码时**诚实返回 available=false**,
+# 绝不伪造指标(与 §20 一致)。输出与 runtime/detection/nwai_decoders.py 的解码语义对齐。
+LAYOUT_CLS = "cls"
+LAYOUT_POSE = "pose"
+
+
+def _task_array(array: Sequence) -> Optional[np.ndarray]:
+    """归一化原始输出为 ``(N, C)`` 2D 行优先数组; 无法归一化返回 None。"""
+    arr = np.asarray(array, np.float32)
+    if arr.ndim == 3:
+        arr = arr[0] if arr.shape[0] == 1 else arr
+    if arr.ndim == 4:  # dense (1,H,W[,C]) 之类的多余批维统一切掉
+        arr = arr[0]
+    if arr.ndim != 2:
+        return None
+    # bcn (C,N) → (N,C)
+    return arr.T if arr.shape[0] < arr.shape[1] else arr
+
+
+def decode_cls(
+    raw_outputs: Sequence[np.ndarray],
+    num_classes: Optional[int] = None,
+    topk: int = 5,
+) -> Optional[Tuple[int, np.ndarray, np.ndarray]]:
+    """解码分类输出 → ``(top1_label, topk_labels, probs)``。
+
+    分类对分数的单调变换(argmax/top-k 排序)不变, 因此 softmax 与否不影响判定。
+    """
+    if not raw_outputs:
+        return None
+    del num_classes  # 分类输出长度即类别数, 无需外部指定
+    array = np.asarray(raw_outputs[0], np.float32)
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+    array = array.reshape(-1)
+    if array.size == 0:
+        return None
+    order = np.argsort(-array)
+    topk_labels = (order[:max(1, int(topk))]).astype(np.int64)
+    shifted = array - float(array.max())
+    probs = np.exp(shifted)
+    probs = probs / probs.sum()
+    return int(order[0]), topk_labels, probs
+
+
+def cls_evaluator(
+    contract: Optional[Dict[str, Any]] = None,
+    ground_truth: Optional[Sequence[Dict[str, Any]]] = None,
+    topk: int = 5,
+) -> ApplicationEvaluatorLike:
+    """分类应用级评测: top-1 / top-k 精度。
+
+    每样本 GT 为 ``{"gt_label": int}``(或 ``{"label": int}``); 缺 GT / 非 cls 布局
+    / 无法解码时诚实返回 ``available=false``。
+    """
+    contract = dict(contract or {})
+    layout = str(contract.get("layout") or LAYOUT_CLS).lower()
+    gt_list = list(ground_truth or [])
+
+    def evaluate(reference, target, samples, num_classes_):
+        del reference  # 只以 target 输出对比 GT
+        if not gt_list:
+            return {"available": False, "reason": "未提供带标注 GT, 无法计算分类精度"}
+        if layout != LAYOUT_CLS:
+            return {"available": False, "reason": "任务 {} 非 classification".format(layout)}
+        if len(gt_list) != len(samples):
+            return {"available": False, "reason": "GT 数 {} 与样本数 {} 不一致".format(
+                len(gt_list), len(samples))}
+        top1_num = topk_num = total = 0
+        try:
+            for sample, gt in zip(samples, gt_list):
+                feeds = {k: np.asarray(v, np.float32) for k, v in sample.items()}
+                decoded = decode_cls(target.run(feeds), num_classes_, topk)
+                if decoded is None:
+                    continue
+                top1_label, topk_labels, _ = decoded
+                gt_label = int(gt.get("gt_label", gt.get("label", -1)))
+                total += 1
+                if gt_label == top1_label:
+                    top1_num += 1
+                if gt_label in topk_labels.tolist():
+                    topk_num += 1
+        except Exception as err:
+            return {"available": False, "reason": "分类评测执行失败: {}".format(err)}
+        if total == 0:
+            return {"available": False, "reason": "无有效样本可评估"}
+        return {
+            "available": True,
+            "accuracy": round(top1_num / total, 4),
+            "top{}_accuracy".format(topk): round(topk_num / total, 4),
+            "samples": total,
+            "layout": layout,
+            "passing_threshold": 0.0,
+        }
+
+    return evaluate
+
+
+def _keypoint_scale(keypoints: np.ndarray) -> float:
+    """由可见关键点外接框对角估计对象尺度, 供 OKS 归一化(对应 bbox 面积的开方)。"""
+    kp = np.asarray(keypoints, np.float32)
+    vis = kp[:, 2] > 0 if kp.shape[1] >= 3 else np.ones(kp.shape[0], bool)
+    if not np.any(vis):
+        return 1.0
+    pts = kp[vis, :2]
+    width = float(pts[:, 0].max() - pts[:, 0].min())
+    height = float(pts[:, 1].max() - pts[:, 1].min())
+    return (float(np.sqrt(width * height)) if width > 0 and height > 0 else 1.0)
+
+
+def decode_pose(
+    raw_outputs: Sequence[np.ndarray],
+    num_classes: Optional[int] = None,
+    has_objectness: Optional[bool] = None,
+) -> Optional[Tuple[np.ndarray, float, np.ndarray]]:
+    """解码姿态头输出 → ``(box_xyxy, score, keypoints (K,3))``(取置信度最高候选)。
+
+    兼容 bcn ``(B,4+nc+K*3,N)`` / bnc ``(B,N,4+nc+K*3)``; 关键点列语义对齐
+    runtime/detection/nwai_decoders.PoseDecoder(x,y,conf)。
+    """
+    if not raw_outputs:
+        return None
+    arr = _task_array(raw_outputs[0])
+    if arr is None:
+        return None
+    columns = arr.shape[1]
+    nc = int(num_classes or 0)
+    if nc:
+        if (columns - (nc + 4)) % 3 == 0:
+            box_cols, has_obj = nc + 4, False
+        else:
+            box_cols, has_obj = nc + 5, True
+    else:
+        box_cols = max(4, columns - (columns - 5) % 3)
+        has_obj = bool(has_objectness)
+    if box_cols < 4 or columns < box_cols + 3:
+        return None
+    box_part = arr[:, :box_cols]
+    kpt_part = arr[:, box_cols:]
+    nc_eff = nc if nc else max(1, box_part.shape[1] - (5 if has_obj else 4))
+    if has_obj:
+        obj = box_part[:, 4]
+        cls_scores = box_part[:, 5:5 + nc_eff]
+    else:
+        obj = np.ones(box_part.shape[0], np.float32)
+        cls_scores = box_part[:, 4:4 + nc_eff]
+    if cls_scores.shape[1] == 0:
+        return None
+    scores = obj * cls_scores.max(axis=1)
+    best = int(np.argmax(scores))
+    cx, cy, width, height = (box_part[best, 0], box_part[best, 1],
+                             box_part[best, 2], box_part[best, 3])
+    box = np.array([cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2], np.float32)
+    kpt_flat = kpt_part[best]
+    num_kpt = kpt_flat.size // 3
+    if num_kpt < 1:
+        return None
+    keypoints = kpt_flat[:num_kpt * 3].reshape(num_kpt, 3)
+    return box, float(scores[best]), keypoints
+
+
+def compute_oks(
+    pred_keypoints: np.ndarray,
+    gt_keypoints: np.ndarray,
+    gt_scale: Optional[float] = None,
+    sigmas: Optional[Sequence[float]] = None,
+) -> float:
+    """单对象 OKS: ``mean_i exp(-d_i^2 / (2 s^2 sigma_i^2)) * v_i``, 按可见度加权平均。"""
+    pred = np.asarray(pred_keypoints, np.float32)
+    gt = np.asarray(gt_keypoints, np.float32)
+    if pred.shape != gt.shape or pred.size == 0:
+        return 0.0
+    k = pred.shape[0]
+    vis = gt[:, 2] > 0 if gt.shape[1] >= 3 else np.ones(k, bool)
+    if not np.any(vis):
+        return 0.0
+    sigma = 0.05 if sigmas is None else float(np.mean(sigmas))
+    scale = float(gt_scale) if gt_scale else _keypoint_scale(gt)
+    d2 = np.sum((pred[:, :2] - gt[:, :2]) ** 2, axis=1)
+    s2 = max(scale * scale, 1e-6)
+    oks_i = np.where(vis, np.exp(-d2 / (2.0 * s2 * (sigma * sigma))), 0.0)
+    return float(oks_i.sum() / vis.sum())
+
+
+def pose_evaluator(
+    contract: Optional[Dict[str, Any]] = None,
+    ground_truth: Optional[Sequence[Dict[str, Any]]] = None,
+    sigma: Optional[float] = None,
+) -> ApplicationEvaluatorLike:
+    """姿态应用级评测: 平均 OKS(Object Keypoint Similarity)。
+
+    每样本 GT 为 ``{"gt_keypoints": (K,3)[x,y,vis], "gt_scale": float(可选)}``;
+    缺 GT / 非 pose 布局 / 无法解码时诚实返回 ``available=false``。
+    """
+    contract = dict(contract or {})
+    layout = str(contract.get("layout") or LAYOUT_POSE).lower()
+    gt_list = list(ground_truth or [])
+
+    def evaluate(reference, target, samples, num_classes_):
+        del reference
+        if not gt_list:
+            return {"available": False, "reason": "未提供带标注 GT(关键点), 无法计算 OKS"}
+        if layout != LAYOUT_POSE:
+            return {"available": False, "reason": "任务 {} 非 pose".format(layout)}
+        if len(gt_list) != len(samples):
+            return {"available": False, "reason": "GT 数 {} 与样本数 {} 不一致".format(
+                len(gt_list), len(samples))}
+        oks_list: List[float] = []
+        try:
+            for sample, gt in zip(samples, gt_list):
+                feeds = {k: np.asarray(v, np.float32) for k, v in sample.items()}
+                decoded = decode_pose(target.run(feeds), num_classes_,
+                                      contract.get("has_objectness"))
+                if decoded is None:
+                    continue
+                _, _, pred_kpts = decoded
+                gt_kpts = np.asarray(gt["gt_keypoints"], np.float32)
+                scale = gt.get("gt_scale") or _keypoint_scale(gt_kpts)
+                oks_list.append(compute_oks(pred_kpts, gt_kpts, scale, sigma))
+        except Exception as err:
+            return {"available": False, "reason": "姿态评测执行失败: {}".format(err)}
+        if not oks_list:
+            return {"available": False, "reason": "无有效样本可评估"}
+        return {
+            "available": True,
+            "oks": round(float(np.mean(oks_list)), 4),
+            "samples": len(oks_list),
+            "layout": layout,
+            "passing_threshold": 0.0,
+        }
+
+    return evaluate
+
+
+def build_evaluator(
+    task: str,
+    contract: Optional[Dict[str, Any]] = None,
+    ground_truth: Optional[Sequence[Dict[str, Any]]] = None,
+) -> ApplicationEvaluatorLike:
+    """按任务分派应用级评测器(ChatGPT 意见 P0-9 多任务 Application Validator)。
+
+    * detection → mAP(mAP50 / mAP@0.5:.95);
+    * classification → top-1 / top-k 精度;
+    * pose → OKS;
+    * 其余(obb/seg/depth/sem)当前无标准标注评估器, 返回诚实 ``available=false``。
+    """
+    task = str(task or "detection").lower()
+    if task == "classification" or task == "cls":
+        return cls_evaluator(contract=contract, ground_truth=ground_truth)
+    if task == "pose":
+        return pose_evaluator(contract=contract, ground_truth=ground_truth)
+    # detection / obb / seg / depth / sem: detection 走 mAP, 其余落 honest unavailable
+    return detection_evaluator(contract=contract, ground_truth=ground_truth)

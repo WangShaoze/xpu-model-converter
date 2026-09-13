@@ -22,16 +22,18 @@ onnx = ["onnx>=1.12", "onnxruntime>=1.13"]
 paddle = ["paddlepaddle>=2.5"]
 storage = ["minio>=7.2"]
 db = ["sqlalchemy>=2.0", "alembic>=1.12", "psycopg2-binary>=2.9"]
+queue = ["redis>=5.0"]
 dev = ["pytest"]
 
 [project.scripts]
 xpu-converter = "xpu_converter.cli.main:main"
+xpu-worker = "xpu_platform.worker.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["xpu_converter*"]
+include = ["xpu_converter*", "xpu_platform*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.j2", "*.yaml", "*.json", "*.sh"]

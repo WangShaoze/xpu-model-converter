@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """仓储层(Phase 3 §56): 任务状态持久化。"""
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
@@ -56,6 +57,20 @@ class JobRepository:
         self._session.commit()
         self._session.refresh(job)
         return job
+
+    def claim(self, job_id: str, from_status: List[str]) -> Optional[ConversionJob]:
+        """乐观锁抢占(§31): 仅当当前状态在 from_status 内才置 RUNNING, 防双 Worker 同跑。"""
+        from sqlalchemy import update
+
+        result = self._session.execute(
+            update(ConversionJob)
+            .where(ConversionJob.id == job_id, ConversionJob.status.in_(from_status))
+            .values(status="RUNNING", started_at=datetime.utcnow())
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.commit()
+        return self.get(job_id)
 
     def add_stage(self, job_id: str, stage_name: str, stage_order: int) -> JobStage:
         stage = JobStage(job_id=job_id, stage_name=stage_name, stage_order=stage_order, status="PENDING")

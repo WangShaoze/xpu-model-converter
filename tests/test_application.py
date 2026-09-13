@@ -11,11 +11,17 @@ from xpu_converter.validator.application import (
     decode_cls,
     decode_detections,
     decode_pose,
+    decode_segment,
     detection_evaluator,
     eval_detections,
     iou_matrix,
     nms,
+    pose_ap_evaluator,
     pose_evaluator,
+    segment_evaluator,
+    obb_evaluator,
+    depth_evaluator,
+    sem_evaluator,
 )
 
 
@@ -231,6 +237,160 @@ class BuildEvaluatorTest(unittest.TestCase):
         report = evaluator(None, FakeSession(np.zeros((1, 0, 6), np.float32)),
                            [{"images": None}], 80)
         self.assertFalse(report["available"])
+
+    def test_build_routes_obb(self):
+        evaluator = build_evaluator("obb", contract={"layout": "obb"})
+        self.assertTrue(callable(evaluator))
+
+    def test_build_routes_depth(self):
+        evaluator = build_evaluator("depth", contract={"layout": "dense"})
+        self.assertTrue(callable(evaluator))
+
+    def test_build_routes_sem(self):
+        evaluator = build_evaluator("sem", contract={"layout": "sem"})
+        self.assertTrue(callable(evaluator))
+
+
+class FakeMultiSession:
+    """返回多个原始输出的测试会话(如分割的 det + proto)。"""
+
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.input_names = ["images"]
+        self.output_names = ["det", "proto"]
+        self.backend_name = "fake"
+
+    def run(self, _feeds):
+        return self.outputs
+
+
+class SegmentEvaluatorTest(unittest.TestCase):
+    def _seg_outputs(self, h=8, w=8):
+        # det 分支 (N, 4+nc+nm): [cx,cy,w,h, cls, coeff...]
+        row = np.array([4.0, 4.0, 8.0, 8.0, 1.0, 1.0], np.float32)
+        det = np.tile(row, (12, 1))
+        proto = np.ones((1, h, w), np.float32)  # nm=1, 验证 proto 3D 保留(GPT 意见 P0-2)
+        return det, proto
+
+    def test_decode_segment_perfect_mask(self):
+        det, proto = self._seg_outputs()
+        decoded = decode_segment([det, proto], num_classes=1, out_h=8, out_w=8, num_masks=1)
+        self.assertIsNotNone(decoded)
+        box, score, label, mask = decoded
+        self.assertAlmostEqual(float(score), 1.0, places=4)
+        self.assertEqual(int(label), 0)
+        self.assertEqual(mask.shape, (8, 8))
+        self.assertEqual(float(mask.mean()), 1.0)
+
+    def test_segment_perfect_mask_map1(self):
+        gt = {"gt_mask": np.ones((8, 8), np.float32)}
+        evaluator = segment_evaluator(contract={"layout": "segment"}, ground_truth=[gt])
+        report = evaluator(None, FakeMultiSession(self._seg_outputs()),
+                           [{"images": np.zeros((1, 3, 8, 8), np.float32)}], 1)
+        self.assertTrue(report["available"])
+        self.assertAlmostEqual(report["map50"], 1.0, places=3)
+        self.assertAlmostEqual(report["mask_iou"], 1.0, places=3)
+
+    def test_segment_missing_gt_unavailable(self):
+        evaluator = segment_evaluator(contract={"layout": "segment"}, ground_truth=[])
+        report = evaluator(None, FakeMultiSession(self._seg_outputs()),
+                           [{"images": None}], 1)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
+
+
+class ObbEvaluatorTest(unittest.TestCase):
+    def test_obb_perfect_match_map1(self):
+        row = np.array([50.0, 50.0, 20.0, 10.0, 0.0, 1.0], np.float32)  # cx,cy,w,h,angle,cls
+        det = np.tile(row, (12, 1))
+        gt = {"gt_obb": np.array([[50.0, 50.0, 20.0, 10.0, 0.0]], np.float32),
+              "gt_labels": np.array([0], np.int64)}
+        evaluator = obb_evaluator(contract={"layout": "obb"}, ground_truth=[gt])
+        report = evaluator(None, FakeSession(det),
+                           [{"images": np.zeros((1, 3, 100, 100), np.float32)}], 1)
+        self.assertTrue(report["available"])
+        self.assertAlmostEqual(report["map50"], 1.0, places=3)
+        self.assertAlmostEqual(report["map"], 1.0, places=3)
+
+    def test_obb_missing_gt_unavailable(self):
+        evaluator = obb_evaluator(contract={"layout": "obb"}, ground_truth=[])
+        report = evaluator(None, FakeSession(np.zeros((1, 0, 6), np.float32)),
+                           [{"images": None}], 1)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
+
+
+class DepthEvaluatorTest(unittest.TestCase):
+    def test_depth_perfect_metrics_zero(self):
+        depth = np.full((8, 8), 5.0, np.float32)
+        gt = {"gt_depth": depth, "gt_mask": np.ones((8, 8), np.float32)}
+        evaluator = depth_evaluator(contract={"layout": "dense"}, ground_truth=[gt])
+        report = evaluator(None, FakeSession(depth),
+                           [{"images": np.zeros((1, 3, 8, 8), np.float32)}], 1)
+        self.assertTrue(report["available"])
+        self.assertEqual(report["abs_rel"], 0.0)
+        self.assertEqual(report["rmse"], 0.0)
+        self.assertEqual(report["d1"], 1.0)
+
+    def test_depth_missing_gt_unavailable(self):
+        evaluator = depth_evaluator(contract={"layout": "dense"}, ground_truth=[])
+        report = evaluator(None, FakeSession(np.zeros((8, 8), np.float32)),
+                           [{"images": None}], 1)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
+
+
+class SemEvaluatorTest(unittest.TestCase):
+    def test_sem_perfect_pixel_acc_miou1(self):
+        gt_label = np.array([[0, 1], [1, 0]], np.int64)  # (H,W)
+        logits = np.stack([1.0 - gt_label, gt_label.astype(np.float32)], axis=0)  # (C,H,W)
+        evaluator = sem_evaluator(contract={"layout": "sem"}, ground_truth=[{"gt_label": gt_label}])
+        report = evaluator(None, FakeSession(logits),
+                           [{"images": np.zeros((1, 3, 2, 2), np.float32)}], 2)
+        self.assertTrue(report["available"])
+        self.assertAlmostEqual(report["pixel_accuracy"], 1.0, places=4)
+        self.assertAlmostEqual(report["miou"], 1.0, places=4)
+        self.assertEqual(len(report["per_class_iou"]), 2)
+
+    def test_sem_missing_gt_unavailable(self):
+        evaluator = sem_evaluator(contract={"layout": "sem"}, ground_truth=[])
+        report = evaluator(None, FakeSession(np.zeros((2, 2, 2), np.float32)),
+                           [{"images": None}], 2)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
+
+
+class PoseApEvaluatorTest(unittest.TestCase):
+    def _pose_row(self, kp_xy, nc=1, num_kpt=2, conf=0.9):
+        box = np.array([50.0, 50.0, 100.0, 100.0], np.float32)  # cxcywh
+        cls_part = np.full(nc, 0.0, np.float32)
+        xs = np.asarray(kp_xy, np.float32)[:, 0]
+        ys = np.asarray(kp_xy, np.float32)[:, 1]
+        vis = np.ones(num_kpt, np.float32)
+        kpt_part = np.stack([xs, ys, vis], axis=1).flatten()
+        row = np.concatenate([box, cls_part, kpt_part]).astype(np.float32)
+        row[4] = conf
+        return np.tile(row, (12, 1))
+
+    def test_pose_ap_perfect_match(self):
+        gt = np.array([[50.0, 50.0, 1.0], [60.0, 60.0, 1.0]], np.float32)
+        arr = self._pose_row(gt[:, :2])
+        evaluator = pose_ap_evaluator(
+            contract={"layout": "pose", "num_classes": 1},
+            ground_truth=[{"gt_keypoints": gt}])
+        report = evaluator(None, FakeSession([arr]), [{"images": None}], 1)
+        self.assertTrue(report["available"])
+        self.assertAlmostEqual(report["ap50"], 1.0, places=3)
+        self.assertAlmostEqual(report["ap75"], 1.0, places=3)
+        self.assertAlmostEqual(report["ap"], 1.0, places=3)
+        self.assertAlmostEqual(report["ar"], 1.0, places=3)
+
+    def test_pose_ap_missing_gt_unavailable(self):
+        evaluator = pose_ap_evaluator(contract={"layout": "pose"}, ground_truth=[])
+        report = evaluator(None, FakeSession([np.zeros((1, 11), np.float32)]),
+                           [{"images": None}], 1)
+        self.assertFalse(report["available"])
+        self.assertIn("GT", report["reason"])
 
 
 if __name__ == "__main__":

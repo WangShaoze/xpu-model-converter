@@ -20,6 +20,7 @@ dependencies = [
 torch = ["torch>=1.13"]
 onnx = ["onnx>=1.12", "onnxruntime>=1.13"]
 paddle = ["paddlepaddle>=2.5"]
+storage = ["minio>=7.2"]
 dev = ["pytest"]
 
 [project.scripts]

@@ -13,6 +13,10 @@ from xpu_converter.engine.artifact_store import (
     ArtifactStore,
     InvalidArtifactKey,
     LocalArtifactStore,
+    MinioArtifactStore,
+    PresignedUrlStore,
+    create_artifact_store,
+    guess_mime,
 )
 from xpu_converter.engine.context import ConversionContext, new_context
 from xpu_converter.engine.events import (
@@ -30,7 +34,8 @@ from xpu_converter.engine.stage import (
 )
 
 __all__ = [
-    "ArtifactStore", "LocalArtifactStore", "InvalidArtifactKey",
+    "ArtifactStore", "LocalArtifactStore", "MinioArtifactStore", "PresignedUrlStore",
+    "create_artifact_store", "guess_mime", "InvalidArtifactKey",
     "ConversionContext", "new_context",
     "Event", "EventSink", "CollectingEventSink", "ConsoleEventSink",
     "ConversionJob", "JobStage", "JobStatus", "StageStatus", "InvalidTransitionError",

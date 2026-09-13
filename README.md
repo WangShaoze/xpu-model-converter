@@ -77,7 +77,9 @@ Deployment Package (<算法名>-dockerimg_<版本>.zip)
 ```
 xpu_converter/
 ├── cli/            # 命令行入口(inspect/convert/export-onnx/analyze/compile/validate/package/build)
-├── frontend/       # 模型适配器: pytorch/{yolov8,yolov9,yolov10,yolov11}, paddle/{ppocr,paddledetection}
+├── frontend/       # 模型适配器: pytorch/{yolov5,yolov6,yolov7(+pose/seg),yolov8(+seg/pose/obb/cls),
+│                   #          yolov9(+seg),yolov10,yolov11(+seg/pose/obb/cls),yolov12,yolov26(+.../depth/sem)},
+│                   #          paddle/{ppocr,paddledetection}(planned)
 ├── ir/             # 与框架无关的中间表示(tensor/node/graph) + ONNX 互转
 ├── optimizer/      # 图优化: shape inference / 常量折叠 / Conv+BN 融合 / 图简化
 ├── rewrite/        # 算子改写: Silu、Mish、Upsample、NMS→CPU
@@ -92,7 +94,7 @@ runtime/            # 公共 Runtime(与模型无关, 所有 YOLO 共用一套, 
 └── detection/      # 检测服务: /predict /predict_image /health /setflag
 
 templates/docker/kunlun/   # Dockerfile / build.sh / readme.txt / start.sh 模板
-configs/models/            # 各模型配置(yolov8/9/10/11)
+configs/models/            # 各模型配置(26 个: 覆盖 yolov5/6/7/8/9/10/11/12/26 及其任务子模型)
 configs/hardware/          # 硬件后端配置(kunlun)
 examples/                  # Manifest 与一键脚本示例
 tests/                     # 单元测试与端到端测试
@@ -152,11 +154,36 @@ tests/                     # 单元测试与端到端测试
 
 ## V1 范围
 
-PyTorch / YOLOv10 / Detection / NCHW / 静态 shape / batch 1 / FP32→FP16 / 昆仑 XPU /
-Raw Detection 输出（**NMS 在 CPU**）/ Flask+Gunicorn / `/predict` + `/health` /
-Docker ZIP / PyTorch-ONNX-XPU 三路校验。
+核心交付锁定为 **YOLOv10 / Detection / NCHW / 静态 shape / batch 1 / FP32→FP16 / 昆仑
+XPU / Raw Detection 输出（**NMS 在 CPU**）/ Flask+Gunicorn / `/predict` + `/health` /
+Docker ZIP / PyTorch-ONNX-XPU 三路校验**。
 
-第二阶段：YOLOv8 / YOLOv9 / YOLO11（配置已就绪）。第三阶段：PaddleOCR / PaddleDetection。
+### 模型支持现状
+
+下表由 `xpu_converter/registry/model_registry.py` 的 `SUPPORT_TABLE` 登记而来。YOLO 系列
+适配器均已实现并注册，但仅 `stable` 可对外交付承诺；`experimental` 表示代码可跑、未经
+真机/真权重全量回归，不给予承诺（见“四层模型生命周期”旁的说明）。
+
+| model_type | 任务 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| yolov10 | detection | **stable** | V1 唯一交付承诺的模型 |
+| yolov8 | detection | experimental | ultralytics 系 |
+| yolov8-seg / -pose / -obb / -cls | segment/pose/obb/cls | experimental | 多任务子模型 |
+| yolov9 / yolov9-seg | detection / segment | experimental | gelan 原生系列 |
+| yolov7 / yolov7-pose / yolov7-seg | detection / pose / segment | experimental | 原生系列，seg 依赖本地 shim |
+| yolov6 | detection | experimental | 美团视觉智能部 |
+| yolov11(-seg/-pose/-obb/-cls) | detection/segment/pose/obb/cls | experimental | ultralytics 系 |
+| yolov5 | detection | experimental | 原生系列 |
+| yolov12 | detection | experimental | 原生系列 |
+| yolov26(-seg/-pose/-obb/-cls/-depth/-sem) | 6 任务 | experimental | ultralytics 系，任务覆盖最全 |
+| ppocr / paddledetection | ocr / detection | planned | Paddle 前端属 P2，未实现 |
+
+### 阶段安排
+
+- 第一阶段（V1 交付）：YOLOv10。
+- 第二阶段（已就绪，experimental）：YOLOv8 / YOLOv9 / YOLO11 / YOLOv5 / YOLOv6 /
+  YOLOv7 / YOLOv12 / YOLO26 及多任务子模型。
+- 第三阶段（planned）：PaddleOCR / PaddleDetection。
 
 ## 测试
 

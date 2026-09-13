@@ -95,13 +95,15 @@ class CliTest(unittest.TestCase):
         for item in metadata.get("files") or []:
             self.assertTrue((package_dir / "yolov10" / Path(item).name).is_file(), item)
 
-        # validate: 基准 ONNX vs 产物, 数值应当一致
+        # validate: 基准 ONNX vs 产物。
+        # P0-1: 本机无昆仑 XPU 卡时, paddle 产物回退 CPU 运行——精度结论如实判
+        # NOT_AVAILABLE(退出码 2), 不再把 CPU 校验误报成"通过"。
         code, output = run_cli(
             "validate", "--source", str(self.onnx_path), "--target", str(artifact),
             "--input-shape", "1,3,32,32", "--max-samples", "2",
         )
-        self.assertEqual(code, 0, output)
-        self.assertIn("通过", output)
+        self.assertEqual(code, 2, output)
+        self.assertIn("NOT_AVAILABLE", output)
 
     def test_convert_reports_missing_model(self):
         code, output = run_cli(

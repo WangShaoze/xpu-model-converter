@@ -30,6 +30,10 @@ class BenchmarkResult:
 
     backend: str = ""
     device: str = "auto"
+    # 执行溯源(P0-2): 性能数字必须绑定"实际运行设备", 禁止把 CPU timing 冒充 XPU
+    actual_device: str = ""
+    execution_mode: str = ""
+    device_available: bool = False
     # 硬件指纹(§23)
     chip: str = ""
     device_id: int = 0
@@ -54,8 +58,19 @@ class BenchmarkResult:
 
     @property
     def credible(self) -> bool:
-        """可信性: 可用且能溯源到具体芯片(性能必须绑定硬件指纹, P0-10)。"""
-        return self.available and bool(self.chip)
+        """可信性(P0-2/P0-10): 真实 XPU 会话 + 可溯源芯片 + 非占位 + SDK/驱动完备。
+
+        仅凭 backend 名(如 ``paddle-xpu``)不足以证明可信——必须实际跑在 xpu 上、
+        有芯片指纹且不是 ``auto`` 占位、底层驱动/SDK 可探测。否则性能数字不可信。
+        """
+        return (
+            self.available
+            and bool(self.chip) and str(self.chip).lower() not in ("auto", "unknown", "")
+            and self.actual_device in ("xpu", "kunlun")
+            and bool(self.device_available)
+            and bool(self.sdk_version)
+            and bool(self.driver_version)
+        )
 
     def compute_fingerprint(self) -> str:
         key = "|".join([
@@ -68,6 +83,9 @@ class BenchmarkResult:
         return {
             "backend": self.backend,
             "device": self.device,
+            "actual_device": self.actual_device,
+            "execution_mode": self.execution_mode,
+            "device_available": self.device_available,
             "chip": self.chip,
             "device_id": self.device_id,
             "sdk_version": self.sdk_version,
@@ -91,10 +109,10 @@ class BenchmarkResult:
     def summary(self) -> str:
         if not self.available:
             return "NOT_AVAILABLE ({})".format(self.notes[0] if self.notes else self.backend)
-        return "{} iters, avg={:.2f}ms p90={:.2f}ms {:.1f} FPS".format(
+        return "{} iters, p50={:.2f}ms p95={:.2f}ms {:.1f} FPS".format(
             self.iterations,
-            self.latency_ms.get("mean", 0.0),
-            self.latency_ms.get("p90", 0.0),
+            self.latency_ms.get("p50", 0.0),
+            self.latency_ms.get("p95", 0.0),
             self.throughput_fps,
         )
 
@@ -136,6 +154,11 @@ class BenchmarkRunner:
             self._hardware_fingerprint(hardware)
         )
         result.device_id = 0
+        # 执行溯源(P0-2): 把会话实际运行设备写进结果, 供后续可信/对账
+        provenance = self._execution_provenance(session)
+        result.actual_device = provenance.get("actual_device", "")
+        result.execution_mode = provenance.get("execution_mode", "")
+        result.device_available = bool(provenance.get("device_available", False))
         # 仿真/占位后端不得输出任何时延数字: 直接标记 NOT_AVAILABLE, 避免把
         # onnxruntime CPU 的耗时伪装成昆仑 XPU 的性能指标(建设目标 §22)。
         if self._is_simulated(session):
@@ -150,23 +173,41 @@ class BenchmarkRunner:
         self._fill_batch(result, sample, feeds)
         result.hardware_fingerprint = result.compute_fingerprint()
 
-        # P0-10 性能必须绑定硬件指纹: 缺芯片指纹(chip 为空)→ 无法溯源, 判不可用
-        if not result.chip:
+        # P0-10 性能必须绑定硬件指纹: 缺芯片指纹或占位 auto → 无法溯源, 判不可用
+        if not result.chip or str(result.chip).lower() in ("auto", "unknown"):
             result.available = False
             result.status = "NOT_AVAILABLE"
             result.notes.append(
-                "缺少芯片指纹(chip 为空): 性能无法溯源到具体硬件, 不入库; "
-                "请通过 hardware 提供 chip/sdk_version/driver_version/firmware_version"
+                "缺少可溯源芯片指纹(chip='{}'): 性能无法溯源到具体硬件, 不入库; "
+                "请通过 hardware 提供真实 chip/sdk_version/driver_version/firmware_version".format(
+                    result.chip or ""
+                )
+            )
+            return result
+
+        # P0-2 禁止把 CPU timing 冒充 XPU timing: 会话必须实际运行在昆仑 XPU 上
+        if result.actual_device not in ("xpu", "kunlun") or not result.device_available:
+            result.available = False
+            result.status = "NOT_AVAILABLE"
+            result.notes.append(
+                "会话未运行在真实昆仑 XPU(actual_device={}, available={}, mode={}): "
+                "本机耗时不能作为 XPU 性能指标".format(
+                    result.actual_device, result.device_available, result.execution_mode or "unknown"
+                )
             )
             return result
 
         for _ in range(self.warmup):
             session.run(feeds)
+            session.synchronize()
+        session.synchronize()
 
         timings: List[float] = []
         for _ in range(self.iterations):
+            # 异步加速器必须先在起点同步, 再计时, 确保测到的是完整 kernel 执行
             start = time.perf_counter()
             session.run(feeds)
+            session.synchronize()
             timings.append((time.perf_counter() - start) * 1000.0)
 
         result.latency_ms = self._statistics(timings)
@@ -231,15 +272,30 @@ class BenchmarkRunner:
         return str(session.backend_name).lower() in ("onnxruntime", "stub", "simulated", "cpu")
 
     @staticmethod
+    def _execution_provenance(session: BaseRuntimeSession) -> Dict[str, Any]:
+        """读取会话执行溯源(P0-2); 旧会话若无该接口则回退到仅声明。"""
+        provenance = getattr(session, "execution_provenance", None)
+        if callable(provenance):
+            return dict(provenance() or {})
+        return {
+            "actual_device": str(getattr(session, "actual_device", "") or ""),
+            "execution_mode": str(getattr(session, "execution_mode", "") or "unknown"),
+            "device_available": bool(getattr(session, "device_available", False)),
+        }
+
+    @staticmethod
     def _statistics(timings: Sequence[float]) -> Dict[str, float]:
         if not timings:
             return {}
         values = np.asarray(timings, dtype=np.float64)
+        std = float(values.std())
         return {
             "mean": float(values.mean()),
             "min": float(values.min()),
             "max": float(values.max()),
+            "std": round(std, 4),
             "p50": float(np.percentile(values, 50)),
             "p90": float(np.percentile(values, 90)),
+            "p95": float(np.percentile(values, 95)),
             "p99": float(np.percentile(values, 99)),
         }

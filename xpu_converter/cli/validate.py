@@ -53,7 +53,7 @@ def cmd_validate(args) -> int:
         "目标格式": artifact.artifact_format,
         "样本数": report.sample_count,
         "合成输入": report.synthetic_inputs,
-        "结论": "通过" if report.passed else "未通过",
+        "结论": "通过" if report.passed else ("NOT_AVAILABLE" if not report.available else "未通过"),
         "汇总": report.summary(),
     })
     if report.pairs:
@@ -94,6 +94,9 @@ def cmd_validate(args) -> int:
         save_json(report.to_dict(), target_file)
         print("已写出: {}".format(target_file))
 
+    # P0-1: 目标未运行在真实 XPU 上属"不可用"而非"未通过"——不能用 CPU 回退冒充验收结论。
+    if not report.available:
+        return 2
     if not report.passed and not getattr(args, "report_only", False):
         raise ValidationError("精度校验未通过: {}".format(report.summary()))
     return 0 if report.passed else 1

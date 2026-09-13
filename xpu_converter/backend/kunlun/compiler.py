@@ -169,9 +169,10 @@ class PaddleXpuSdkAdapter(KunlunSdkAdapter):
             precision=config.precision,
             sdk_adapter=self.name,
             target_chip=config.target_chip,
-            artifact_format="paddle",
+            artifact_format="paddle_static_graph",
             notes=[
-                "昆仑 XPU kernel 由 Paddle Inference 在加载时编译; 交付产物为设备无关静态图",
+                "昆仑 XPU kernel 由 Paddle Inference 在加载时编译; 交付产物为设备无关"
+                " Paddle 静态图(paddle_static_graph), 有别于 Native XPU 编译产物(xpu_native)",
             ],
             metadata={
                 "onnx_source": xpu_graph.onnx_path,
@@ -252,7 +253,7 @@ class XpuToolkitSdkAdapter(KunlunSdkAdapter):
             precision=config.precision,
             sdk_adapter=self.name,
             target_chip=config.target_chip,
-            artifact_format="xpu",
+            artifact_format="xpu_native",
             metadata={"sdk_module": module_name, "onnx_source": xpu_graph.onnx_path},
             files=[str(produced)],
         )

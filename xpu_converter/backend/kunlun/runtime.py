@@ -41,11 +41,19 @@ class OnnxRuntimeSession(BaseRuntimeSession):
 
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        chosen_providers = self._resolve_providers(ort, device, providers)
         self._session = ort.InferenceSession(
             model_path,
             sess_options=options,
-            providers=self._resolve_providers(ort, device, providers),
+            providers=chosen_providers,
         )
+        # 执行溯源: 如实声明 ONNX 参考会话实际运行的设备(不伪装成 XPU)
+        self.requested_device = str(device or "auto")
+        cuda = any("CUDA" in provider for provider in chosen_providers)
+        self.actual_device = "cuda:0" if cuda else "cpu"
+        self.execution_mode = "hardware" if cuda else "simulated"
+        self.device_available = bool(cuda)
+        self.device_id = 0
 
     @staticmethod
     def _resolve_providers(ort, device: str, providers: Optional[List[str]]) -> List[str]:
@@ -89,6 +97,11 @@ class XpuToolkitRuntimeSession(BaseRuntimeSession):
     def __init__(self, model_path: str, module_name: str, device: str = "auto") -> None:
         self._model_path = model_path
         self._module = importlib.import_module(module_name)
+        self.requested_device = str(device or "auto")
+        self.actual_device = "xpu"
+        self.execution_mode = "hardware"
+        self.device_available = True
+        self.device_id = int(os.environ.get("XPU_DEVICE_ID") or os.environ.get("GPU_ID") or 0)
         runtime_cls = None
         for name in ("XpuRuntime", "Runtime", "XpuInference", "XNNToolkitRuntime"):
             runtime_cls = getattr(self._module, name, None)
@@ -146,8 +159,24 @@ class PaddleXpuRuntimeSession(BaseRuntimeSession):
         self._inference = inference
         self._model_path = model_path
         self._params_path = params_path or self._resolve_params(model_path)
-        self._device = self._resolve_device(device)
+        self.requested_device = str(device or "auto").lower()
+        self.actual_device = self._resolve_device(device)
+        # 执行溯源(P0-1): 只有真正跑在 XPU 才算 hardware 模式; auto 回退 CPU 必须如实
+        # 标记为 fallback_cpu, 禁止借用 backend_name="paddle-xpu" 冒充真实 XPU 执行。
+        self.device_available = self.actual_device == "xpu"
+        self.execution_mode = (
+            "hardware" if self.actual_device == "xpu" else
+            ("cpu" if self.requested_device == "cpu" else "fallback_cpu")
+        )
+        self.device_id = self._device_id() if self.device_available else 0
         self._predictor = self._create_predictor()
+
+    def synchronize(self) -> None:
+        """Paddle Inference 的 ``run()`` 内已阻塞等待计算完成(copy_to_cpu 会等待)。
+
+        对 Paddle 路径, 计时以 ``copy_to_cpu`` 为界已同步, 无需额外等待; 保留此
+        钩子以便与原生异步 XPU 运行时口径一致(P1-2)。
+        """
 
     @staticmethod
     def _resolve_params(model_path: str) -> Optional[str]:
@@ -190,7 +219,7 @@ class PaddleXpuRuntimeSession(BaseRuntimeSession):
         else:
             config = self._inference.Config(self._model_path)
         config.disable_glog_info()
-        if self._device == "xpu":
+        if self.actual_device == "xpu":
             if not hasattr(config, "enable_xpu"):
                 raise BackendNotAvailableError(
                     "当前 Paddle 未编译 XPU 支持, 无法加载 XPU 产物: {}".format(self._model_path)

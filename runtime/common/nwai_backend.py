@@ -72,12 +72,13 @@ class RuntimeEngine:
         if not artifact_format and adapter == "stub":
             artifact_format = "stub"
         device_count = xpu_device_count()
-        # 真实 XPU 交付产物: xpu(专用) 与 paddle(设备无关静态图, 现场按卡加载)
-        requires_xpu = artifact_format in ("xpu", "paddle")
+        # 真实 XPU 交付产物: xpu_native(专用) 与 paddle_static_graph(设备无关静态图, 现场按卡加载);
+        # 兼容旧命名 xpu / paddle(P0-3: 语义拆分前的历史产物)
+        requires_xpu = artifact_format in ("xpu_native", "paddle_static_graph", "xpu", "paddle")
 
         if requires_xpu:
             if self.device == "cpu":
-                if artifact_format == "xpu":
+                if artifact_format in ("xpu_native", "xpu"):
                     raise RuntimeError(
                         "DEVICE=cpu, 而交付模型为 XPU 专用产物({}), 无法在 CPU 上加载; "
                         "如需 CPU 联调请改用 stub/ONNX 产物。".format(self.model_file)
@@ -91,7 +92,7 @@ class RuntimeEngine:
                         self.device, self.model_file
                     )
                 )
-            if artifact_format == "paddle":
+            if artifact_format in ("paddle_static_graph", "paddle"):
                 self._load_paddle(use_xpu=True)
             else:
                 self._load_xpu_toolkit()

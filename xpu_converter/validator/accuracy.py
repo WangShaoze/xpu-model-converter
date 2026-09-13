@@ -34,7 +34,12 @@ ApplicationEvaluator = Callable[..., Dict[str, Any]]
 
 @dataclass
 class AccuracyReport:
-    """三层精度校验报告。"""
+    """三层精度校验报告。
+
+    P0-1(禁止 Validator 自动 CPU fallback): 报告必须携带执行溯源
+    (:attr:`execution`), 并且 :attr:`available` 只有在目标确实运行在真实 XPU
+    上才为真。CPU 回退下的"数值一致"只能算 NOT_AVAILABLE, 不能算 PASS。
+    """
 
     passed: bool = True
     graph: Dict[str, Any] = field(default_factory=dict)
@@ -42,8 +47,19 @@ class AccuracyReport:
     application: Dict[str, Any] = field(default_factory=dict)
     sample_count: int = 0
     synthetic_inputs: bool = False
+    # 目标会话是否真的运行在目标 XPU 上; 否则整个精度结论判 NOT_AVAILABLE(P0-1)
+    available: bool = True
+    # 执行溯源(P1-4): reference/target 各自的实际设备与运行模式
+    execution: Dict[str, Any] = field(default_factory=dict)
     items: List[TensorCompareResult] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+
+    @property
+    def status(self) -> str:
+        """验收语义: 目标未跑在真实 XPU 上 → NOT_AVAILABLE; 否则按数值结论 PASS/FAIL。"""
+        if not self.available:
+            return "NOT_AVAILABLE"
+        return "PASS" if self.passed else "FAIL"
 
     @property
     def pairs(self) -> Dict[str, Dict[str, Any]]:
@@ -53,17 +69,24 @@ class AccuracyReport:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "passed": self.passed,
+            "available": self.available,
+            "status": self.status,
             "sample_count": self.sample_count,
             "synthetic_inputs": self.synthetic_inputs,
             "graph": dict(self.graph),
             "backend": dict(self.backend),
             "application": dict(self.application),
+            "execution": dict(self.execution),
             "overall": summarize(self.items) if self.items else {},
             "notes": list(self.notes),
         }
 
     def summary(self) -> str:
         parts: List[str] = []
+        if not self.available:
+            return "NOT_AVAILABLE (target 未运行在真实 XPU: {})".format(
+                self.execution.get("target_actual_device") or "unknown"
+            )
         for name, detail in (("graph", self.graph), ("backend", self.backend)):
             if not detail:
                 continue
@@ -158,6 +181,24 @@ class AccuracyValidator:
         """
         report = AccuracyReport(sample_count=len(samples), synthetic_inputs=synthetic)
         report.notes.extend(notes or [])
+        report.execution = {
+            "reference": _execution_provenance(reference),
+            "target": _execution_provenance(target),
+            "target_actual_device": str(getattr(target, "actual_device", "") or ""),
+            "target_execution_mode": str(getattr(target, "execution_mode", "") or ""),
+        }
+
+        # P0-1 硬门禁: 目标后端必须真正运行在昆仑 XPU 上, 否则整个精度结论
+        # 判 NOT_AVAILABLE。CPU 回退下的"数值一致"不代表交给客户的精度通过。
+        target_device = str(getattr(target, "actual_device", "") or "")
+        if target_device and target_device not in ("xpu", "kunlun"):
+            report.available = False
+            report.notes.append(
+                "target 未运行在真实昆仑 XPU(actual_device={}, mode={}): 精度结论标记为 "
+                "NOT_AVAILABLE, 需在真实 XPU 环境复验后才能判定 PASS".format(
+                    target_device, str(getattr(target, "execution_mode", "") or "")
+                )
+            )
 
         if graph_reference is not None:
             detail, items = self.compare_sessions(
@@ -188,8 +229,10 @@ class AccuracyValidator:
 
         numeric = [detail for detail in (report.graph, report.backend)
                    if detail and not detail.get("skipped")]
-        report.passed = all(bool(detail.get("ok")) for detail in numeric)
-        if not report.passed and self.fail_on_mismatch:
+        report.passed = all(bool(detail.get("ok")) for detail in numeric) and report.available
+        # 仅在目标确实跑在真实 XPU 上时才把数值不一致视为"校验失败"; CPU 回退属
+        # 不可用而非不通过, 交给上层按 NOT_AVAILABLE 处理, 不抛 ValidationError。
+        if report.available and not all(bool(detail.get("ok")) for detail in numeric) and self.fail_on_mismatch:
             failures = [name for name, detail in (("graph", report.graph), ("backend", report.backend))
                         if detail and not detail.get("skipped") and not detail.get("ok")]
             raise ValidationError(
@@ -237,6 +280,21 @@ class AccuracyValidator:
 def _session_name(session: BaseRuntimeSession) -> str:
     """会话标识, 用于报告的 reference/target 字段(如 ``onnxruntime`` / ``kunlun-xpu``)。"""
     return str(getattr(session, "backend_name", "") or type(session).__name__)
+
+
+def _execution_provenance(session: BaseRuntimeSession) -> Dict[str, Any]:
+    """提取会话的执行溯源(P0-1/P1-4)。"""
+    provenance = getattr(session, "execution_provenance", None)
+    if callable(provenance):
+        value = provenance()
+        return dict(value or {})
+    return {
+        "backend": _session_name(session),
+        "actual_device": str(getattr(session, "actual_device", "") or ""),
+        "execution_mode": str(getattr(session, "execution_mode", "") or ""),
+        "device_available": bool(getattr(session, "device_available", False)),
+        "device_id": int(getattr(session, "device_id", 0) or 0),
+    }
 
 
 def load_dataset_inputs(

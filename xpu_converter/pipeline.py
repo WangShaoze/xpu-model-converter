@@ -5,7 +5,7 @@
 
     [01] 模型识别        [02] 模型加载        [03] PyTorch → ONNX
     [04] ONNX Graph Check[05] XPU Operator Analysis
-    [06] Graph Optimization  [07] Kunlun Compile
+    [06] Graph Optimization  [07] Backend Artifact Build
     [08] Accuracy Validation [09] Performance Benchmark
     [10] Docker Package
 """
@@ -41,7 +41,7 @@ STEP_TITLES = [
     "ONNX Graph Check",
     "XPU Operator Analysis",
     "Graph Optimization",
-    "Kunlun Compile",
+    "Backend Artifact Build",
     "Accuracy Validation",
     "Performance Benchmark",
     "Docker Package",

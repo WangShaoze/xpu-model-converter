@@ -114,9 +114,22 @@ class BackendArtifact:
 
 
 class BaseRuntimeSession(ABC):
-    """编译产物的一次推理会话。"""
+    """编译产物的一次推理会话。
+
+    从 P0-1/P0-2(禁止把 CPU 执行误当成目标 XPU 执行)起, 所有会话语义上都必须
+    携带**执行溯源(execution provenance)**: 它到底跑在哪个真实设备上, 而不是
+    只凭 ``backend_name = "paddle-xpu"`` 就默认等于跑在 XPU 上。Validator 与
+    Benchmark 依赖这里判定 ``actual_device == "xpu"`` 才会产出可信的
+    PASS / OK 结论。
+    """
 
     backend_name = "base"
+    # ---- 执行溯源(每个会话必须如实填充, 默认置空表示"未声明", 便于门禁识别)
+    requested_device: str = "auto"      # 用户请求的运行设备
+    actual_device: str = ""             # 实际运行设备: xpu / cpu / cuda:0 ...
+    execution_mode: str = ""            # hardware / fallback_cpu / cpu / simulated
+    device_available: bool = False      # 目标加速设备在本次运行是否真实可用
+    device_id: int = 0                  # 实际使用的设备编号
 
     @abstractmethod
     def run(self, inputs: Dict[str, Any]) -> List[Any]:
@@ -134,6 +147,24 @@ class BaseRuntimeSession(ABC):
 
     def input_shapes(self) -> Optional[Dict[str, Tuple]]:
         return None
+
+    def synchronize(self) -> None:
+        """阻塞直到异步加速器执行完成(P1-2)。
+
+        默认实现为无操作——CPU / 同步式后端天然同步, 无需等待; 真正异步的
+        XPU/GPU 后端必须在子类覆盖, 否则 benchmark 计时会只测到 enqueue 时间。
+        """
+
+    def execution_provenance(self) -> Dict[str, Any]:
+        """把执行溯源序列化为可落盘报告(P1-4 / 状态机 Gate G6)。"""
+        return {
+            "backend": self.backend_name,
+            "requested_device": self.requested_device,
+            "actual_device": self.actual_device,
+            "execution_mode": self.execution_mode,
+            "device_available": bool(self.device_available),
+            "device_id": int(self.device_id or 0),
+        }
 
     def close(self) -> None:
         """释放会话资源, 默认无操作。"""

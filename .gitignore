@@ -16,6 +16,10 @@ t_pose/
 build/
 *.xpu
 
+# 开发数据库(Phase 3, 生产用 Postgres)
+*.db
+*.sqlite3
+
 # 模型权重目录: 权重一律不入库, 仅保留占位文件
 models/*
 !models/.gitkeep

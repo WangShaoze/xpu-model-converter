@@ -12,6 +12,7 @@ from xpu_converter.registry.model_registry import (
     STATUS_EXPERIMENTAL,
     STATUS_PLANNED,
     STATUS_STABLE,
+    FILENAME_HINTS,
     ModelSupport,
     available_model_types,
     create_adapter,
@@ -22,17 +23,28 @@ from xpu_converter.registry.model_registry import (
     resolve_model_config,
     supported_models,
 )
+from xpu_converter.registry.readiness import (
+    ModelReadiness,
+    assert_support_claims,
+    check_model_readiness,
+    effective_status,
+)
 
 __all__ = [
     "STATUS_EXPERIMENTAL",
     "STATUS_PLANNED",
     "STATUS_STABLE",
+    "FILENAME_HINTS",
+    "ModelReadiness",
     "ModelSupport",
+    "assert_support_claims",
     "available_backends",
     "available_model_types",
+    "check_model_readiness",
     "create_adapter",
     "create_backend",
     "detect_model_type",
+    "effective_status",
     "get_adapter_class",
     "get_backend_class",
     "kunlun_config_from",

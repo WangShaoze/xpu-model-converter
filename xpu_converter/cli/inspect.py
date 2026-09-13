@@ -110,10 +110,11 @@ def cmd_analyze(args) -> int:
 
 
 def cmd_list_models(args) -> int:
-    """``list-models``: 列出模型的生命周期状态(ChatGPT 修改意见 §50)。
+    """``list-models``: 列出模型的生命周期状态(ChatGPT 修改意见 §50/P0-7)。
 
-    "代码里有 adapter" 不等于 "承诺支持", 因此这里显式区分 stable / experimental
-    / planned, 避免把实验性模型当成已交付能力对外宣称(§49/§51)。
+    "代码里有 adapter" 不等于 "承诺支持"。除生命周期声明外, 这里自动附加结构就绪
+    (``ready``)口径 —— Adapter/YAML/OutputContract/Runtime 是否齐全(P0-7), 把
+    声明状态与自动检测结果并列, 一眼看出"哪一句 stable 可能是假完成"。
     """
     from xpu_converter.registry.model_registry import available_model_types, supported_models
 
@@ -126,26 +127,44 @@ def cmd_list_models(args) -> int:
     seen = set()
     for item in supported_models():
         seen.add(item.model_type)
+        ready, gap = _readiness_summary(item.model_type, loaded)
         rows.append({
             "model_type": item.model_type,
             "framework": item.framework,
             "status": item.status.upper(),
             "adapter": "yes" if item.model_type in loaded else "no",
+            "ready": ready,
+            "gap": gap,
             "notes": item.notes,
         })
     for model_type in sorted(loaded - seen):
+        ready, gap = _readiness_summary(model_type, loaded)
         rows.append({"model_type": model_type, "framework": "-", "status": "EXPERIMENTAL",
-                     "adapter": "yes", "notes": "未在生命周期表登记"})
+                     "adapter": "yes", "ready": ready, "gap": gap,
+                     "notes": "未在生命周期表登记"})
 
     wanted = getattr(args, "status", None)
     if wanted:
         rows = [row for row in rows if row["status"].lower() == str(wanted).lower()]
 
-    _print_table(rows, ("model_type", "framework", "status", "adapter", "notes"))
+    _print_table(rows, ("model_type", "framework", "status", "adapter", "ready", "gap", "notes"))
     if getattr(args, "json", None):
         save_json({"models": rows}, args.json)
         print("已写出: {}".format(args.json))
     return 0
+
+
+def _readiness_summary(model_type: str, loaded: set) -> tuple:
+    """自动就绪检测摘要(ready/缺口), 失败降级为 unknown。"""
+    from xpu_converter.registry.readiness import check_model_readiness
+
+    try:
+        readiness = check_model_readiness(model_type, loaded_adapters=loaded)
+    except Exception:  # pragma: no cover - 属核心链路的防御
+        return "?", "detect-error"
+    if readiness.structural_ok:
+        return "OK", ""
+    return "MISSING", ",".join(readiness.missing())
 
 
 def cmd_list_capabilities(args) -> int:

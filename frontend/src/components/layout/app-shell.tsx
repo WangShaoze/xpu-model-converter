@@ -11,10 +11,10 @@ import { Spinner } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
 const NAV = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/projects", label: "Projects" },
-  { href: "/jobs", label: "Jobs" },
-  { href: "/settings", label: "Settings" },
+  { href: "/dashboard", label: "仪表盘" },
+  { href: "/projects", label: "项目" },
+  { href: "/jobs", label: "任务" },
+  { href: "/settings", label: "设置" },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -69,7 +69,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span className="text-sm text-neutral-500">模型转换 Web SaaS</span>
           <div className="flex items-center gap-3">
             <span className="text-sm font-medium text-neutral-700">
-              {user.username}
+              当前用户: {user.username}
             </span>
             <Button
               variant="outline"
@@ -79,7 +79,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 router.replace("/login");
               }}
             >
-              退出
+              退出登录
             </Button>
           </div>
         </header>

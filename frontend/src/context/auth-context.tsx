@@ -1,6 +1,6 @@
 "use client";
 
-// 认证上下文: token/user 存 localStorage, 提供 login/register/logout。
+// 认证上下文: token/user 存 localStorage, 提供 login/logout。
 import {
   createContext,
   useCallback,
@@ -18,7 +18,6 @@ interface AuthContextValue {
   token: string | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -41,19 +40,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(data.access_token);
   }, []);
 
-  const register = useCallback(
-    async (username: string, email: string, password: string) => {
-      const data = await authenticate("/auth/register", {
-        username,
-        email,
-        password,
-      });
-      setUser(data.user);
-      setToken(data.access_token);
-    },
-    [],
-  );
-
   const logout = useCallback(() => {
     clearAuth();
     setUser(null);
@@ -61,8 +47,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, token, loading, login, register, logout }),
-    [user, token, loading, login, register, logout],
+    () => ({ user, token, loading, login, logout }),
+    [user, token, loading, login, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

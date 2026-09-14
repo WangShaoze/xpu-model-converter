@@ -58,7 +58,7 @@ export default function ProjectsPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-neutral-900">Projects</h1>
+        <h1 className="text-xl font-semibold text-neutral-900">项目列表</h1>
         <Button size="sm" onClick={() => setCreating((v) => !v)}>
           {creating ? "取消" : "新建项目"}
         </Button>

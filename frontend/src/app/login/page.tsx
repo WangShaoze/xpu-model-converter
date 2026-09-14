@@ -1,25 +1,26 @@
 "use client";
 
-// 登录页。
-import { useState } from "react";
-import type { FormEvent } from "react";
+// 登录页: 支持 ?registered=1 显示"注册成功"提示。
+import { Suspense, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { ApiError } from "@/lib/api";
 
-export default function LoginPage() {
+function LoginForm() {
   const { login } = useAuth();
   const router = useRouter();
+  const params = useSearchParams();
+  const registered = params.get("registered") === "1";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function onSubmit(e: FormEvent<HTMLFormElement>) {
+  async function onSubmit(e: { preventDefault: () => void }) {
     e.preventDefault();
     setError("");
     setBusy(true);
@@ -38,6 +39,11 @@ export default function LoginPage() {
       <Card className="w-full max-w-sm">
         <CardHeader title="登录 XPU Model Hub" description="模型转换 Web SaaS 控制台" />
         <CardContent>
+          {registered && (
+            <p className="mb-4 rounded-md bg-green-50 px-3 py-2 text-sm text-green-700">
+              注册成功, 请使用新账号登录
+            </p>
+          )}
           <form onSubmit={onSubmit} className="space-y-4">
             <div>
               <Label htmlFor="username">用户名</Label>
@@ -74,5 +80,13 @@ export default function LoginPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

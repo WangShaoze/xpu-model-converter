@@ -4,7 +4,7 @@
 import type { Stage } from "@/lib/types";
 import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { cn } from "@/lib/utils";
+import { cn, statusText } from "@/lib/utils";
 
 function StageIcon({ status }: { status: string }) {
   if (status === "SUCCESS") return <span className="text-green-600">✓</span>;
@@ -41,7 +41,7 @@ export function StageTimeline({ stages }: { stages: Stage[] }) {
               {s.error_message}
             </span>
           )}
-          <Badge tone={toneForStatus(s.status)}>{s.status}</Badge>
+          <Badge tone={toneForStatus(s.status)}>{statusText(s.status)}</Badge>
           <span className={cn("w-10 text-right text-xs text-neutral-400")}>
             {s.progress}%
           </span>

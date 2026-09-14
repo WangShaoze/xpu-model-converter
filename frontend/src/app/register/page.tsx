@@ -1,17 +1,15 @@
 "use client";
 
-// 注册页。
+// 注册页: 注册成功后跳转登录页, 由用户主动登录。
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useAuth } from "@/context/auth-context";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
-import { ApiError } from "@/lib/api";
+import { ApiError, registerUser } from "@/lib/api";
 
 export default function RegisterPage() {
-  const { register } = useAuth();
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -24,8 +22,8 @@ export default function RegisterPage() {
     setError("");
     setBusy(true);
     try {
-      await register(username, email, password);
-      router.replace("/dashboard");
+      await registerUser({ username, email, password });
+      router.replace("/login?registered=1");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "注册失败, 请重试");
     } finally {

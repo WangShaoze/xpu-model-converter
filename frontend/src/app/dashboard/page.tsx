@@ -8,7 +8,7 @@ import type { Job, Model, Project, Worker } from "@/lib/types";
 import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Spinner, Table, TBody, Td, Th, THead } from "@/components/ui/table";
-import { formatTime } from "@/lib/utils";
+import { formatTime, statusText } from "@/lib/utils";
 
 interface Stats {
   projects: number;
@@ -98,19 +98,19 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold text-neutral-900">Dashboard</h1>
+      <h1 className="text-xl font-semibold text-neutral-900">仪表盘</h1>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-        <StatCard label="Projects" value={stats.projects} />
-        <StatCard label="Models" value={stats.models} />
-        <StatCard label="Running" value={stats.running} />
-        <StatCard label="Queued" value={stats.queued} />
-        <StatCard label="Success" value={stats.success} />
-        <StatCard label="Failed" value={stats.failed} />
+        <StatCard label="项目数" value={stats.projects} />
+        <StatCard label="模型数" value={stats.models} />
+        <StatCard label="运行中" value={stats.running} />
+        <StatCard label="排队中" value={stats.queued} />
+        <StatCard label="成功" value={stats.success} />
+        <StatCard label="失败" value={stats.failed} />
       </div>
 
       <Card>
         <CardHeader
-          title="XPU Workers"
+          title="XPU 工作节点"
           description="当前声明的可用 XPU Worker"
         />
         <CardContent className="flex items-center gap-2 text-sm text-neutral-700">
@@ -163,7 +163,7 @@ export default function DashboardPage() {
                     </Link>
                   </Td>
                   <Td>
-                    <Badge tone={toneForStatus(j.status)}>{j.status}</Badge>
+                    <Badge tone={toneForStatus(j.status)}>{statusText(j.status)}</Badge>
                   </Td>
                   <Td>{j.progress}%</Td>
                   <Td>{formatTime(j.created_at ?? null)}</Td>

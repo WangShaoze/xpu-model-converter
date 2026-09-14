@@ -9,7 +9,7 @@ import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Spinner, Table, TBody, Td, Th, THead } from "@/components/ui/table";
-import { formatTime } from "@/lib/utils";
+import { formatTime, statusText } from "@/lib/utils";
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -45,7 +45,7 @@ export default function JobsPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-neutral-900">Jobs</h1>
+        <h1 className="text-xl font-semibold text-neutral-900">转换任务</h1>
         <select
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -64,7 +64,7 @@ export default function JobsPage() {
 
       <Card>
         <CardHeader
-          title="转换任务"
+          title="任务列表"
           description={`共 ${shown.length} 条`}
         />
         <CardContent className="p-0">
@@ -103,7 +103,7 @@ export default function JobsPage() {
                     </Td>
                     <Td className="text-neutral-500">{projectName(j.project_id)}</Td>
                     <Td>
-                      <Badge tone={toneForStatus(j.status)}>{j.status}</Badge>
+                      <Badge tone={toneForStatus(j.status)}>{statusText(j.status)}</Badge>
                     </Td>
                     <Td className="w-36">
                       <Progress value={j.progress} className="h-1.5" />

@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Spinner, Table, TBody, Td, Th, THead } from "@/components/ui/table";
 import { StageTimeline } from "@/components/job/stage-timeline";
 import { LiveEvents } from "@/components/job/live-events";
-import { formatBytes, formatTime } from "@/lib/utils";
+import { formatBytes, formatTime, statusText } from "@/lib/utils";
 
 const TERMINAL = new Set(["SUCCESS", "FAILED", "CANCELLED"]);
 
@@ -145,7 +145,7 @@ export default function JobDetailPage() {
           <CardHeader
             title="Stage 时间线"
             description={`整体进度 ${job.progress}%`}
-            action={<Badge tone={toneForStatus(job.status)}>{job.status}</Badge>}
+            action={<Badge tone={toneForStatus(job.status)}>{statusText(job.status)}</Badge>}
           />
           <CardContent>
             {job.error_message && (
@@ -188,7 +188,7 @@ export default function JobDetailPage() {
       </div>
 
       <Card>
-        <CardHeader title="Artifacts" description={`共 ${artifacts.length} 个产物`} />
+        <CardHeader title="转换产物" description={`共 ${artifacts.length} 个产物`} />
         <CardContent className="p-0">
           <Table>
             <THead>

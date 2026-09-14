@@ -172,3 +172,12 @@ export async function authenticate(
   setAuth(data.access_token, data.user);
   return data;
 }
+
+/** 仅注册(不自动登录): 注册成功后应跳转登录页, 由用户主动登录。 */
+export async function registerUser(payload: Record<string, string>): Promise<TokenResponse> {
+  return api<TokenResponse>("/api/v1/auth/register", {
+    method: "POST",
+    body: payload,
+    token: null,
+  });
+}

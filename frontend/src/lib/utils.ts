@@ -18,3 +18,23 @@ export function formatTime(iso?: string | null): string {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("zh-CN", { hour12: false });
 }
+
+// 后端状态枚举 → 中文展示
+const STATUS_TEXT: Record<string, string> = {
+  CREATED: "已创建",
+  QUEUED: "排队中",
+  RUNNING: "运行中",
+  SUCCESS: "成功",
+  FAILED: "失败",
+  CANCELLED: "已取消",
+  SKIPPED: "已跳过",
+  PENDING: "等待中",
+  READY: "就绪",
+  PROCESSING: "处理中",
+  OFFLINE: "离线",
+};
+
+export function statusText(status?: string | null): string {
+  if (!status) return "-";
+  return STATUS_TEXT[status] ?? status;
+}

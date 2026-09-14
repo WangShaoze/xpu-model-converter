@@ -16,6 +16,9 @@ t_pose/
 build/
 *.xpu
 
+# Worker/API 运行时工作区(模型上传落盘、Job 临时产物)
+worker-workspace/
+
 # 开发数据库(Phase 3, 生产用 Postgres)
 *.db
 *.sqlite3

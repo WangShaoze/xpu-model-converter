@@ -164,7 +164,11 @@ export async function authenticate(
   path: "/auth/login" | "/auth/register",
   payload: Record<string, string>,
 ): Promise<TokenResponse> {
-  const data = await api<TokenResponse>(path, { method: "POST", body: payload, token: null });
+  const data = await api<TokenResponse>(`/api/v1${path}`, {
+    method: "POST",
+    body: payload,
+    token: null,
+  });
   setAuth(data.access_token, data.user);
   return data;
 }

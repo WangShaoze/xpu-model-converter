@@ -39,7 +39,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen bg-neutral-50">
       <aside className="flex w-56 flex-col border-r border-neutral-200 bg-white">
         <div className="flex h-14 items-center border-b border-neutral-200 px-5 font-semibold text-neutral-900">
-          XPU Model Hub
+          Model Converter Hub
         </div>
         <nav className="flex-1 space-y-1 p-3">
           {NAV.map((item) => {
@@ -61,7 +61,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           })}
         </nav>
         <div className="border-t border-neutral-200 p-3 text-xs text-neutral-500">
-          v1.0 · 昆仑芯 XPU
+          v1.0 模型转换 Web SaaS
         </div>
       </aside>
       <div className="flex flex-1 flex-col">
@@ -69,7 +69,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span className="text-sm text-neutral-500">模型转换 Web SaaS</span>
           <div className="flex items-center gap-3">
             <span className="text-sm font-medium text-neutral-700">
-              当前用户: {user.username}
+              {user.username}
             </span>
             <Button
               variant="outline"
@@ -79,7 +79,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 router.replace("/login");
               }}
             >
-              退出登录
+              退出
             </Button>
           </div>
         </header>

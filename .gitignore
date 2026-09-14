@@ -23,6 +23,11 @@ worker-workspace/
 *.db
 *.sqlite3
 
+# 认证 RSA 私钥(登录密码传输加密): 仅本地开发自动生成, 严禁入库
+dev-auth-key.pem
+# 开发环境 TLS 自签证书(scripts/dev-tls.sh 生成)
+dev-certs/
+
 # 模型权重目录: 权重一律不入库, 仅保留占位文件
 models/*
 !models/.gitkeep

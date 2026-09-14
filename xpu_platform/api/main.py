@@ -26,6 +26,7 @@ from xpu_platform.api.routers import (
 )
 from xpu_platform.db.models.base import Base
 from xpu_platform.db.session import create_engine_from_url, create_session_factory
+from xpu_platform.api.ratelimit import LoginGuard
 from xpu_platform.worker.queue import InMemoryJobQueue
 
 settings = get_settings()
@@ -56,6 +57,13 @@ app.add_exception_handler(Exception, unified_error_handler)
 
 # 任务队列: 生产可设为 Redis; 此处缺省单进程内存队列供开发/测试
 app.state.job_queue = InMemoryJobQueue()
+# /auth/* 防暴力破解: IP 限流 + 账号失败锁定(多副本生产应换 Redis 实现)
+app.state.login_guard = LoginGuard(
+    login_rate_per_minute=settings.login_rate_per_minute,
+    login_max_failures=settings.login_max_failures,
+    login_lock_minutes=settings.login_lock_minutes,
+    register_rate_per_hour=settings.register_rate_per_hour,
+)
 # 数据库会话工厂: API 端点(+SSE 回放)统一从这里取, 测试可用同构 factory 替换
 app.state.session_factory = create_session_factory(settings.database_url)
 

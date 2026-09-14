@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Phase 5 FastAPI 测试: 认证 / 项目 / 模型上传 / Job 入队 / SSE / Artifact / 鉴权拒绝。"""
+import base64
 import tempfile
 import unittest
 import uuid
@@ -9,6 +10,8 @@ from unittest import mock
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
 from xpu_platform.api.config import Settings
 from xpu_platform.api.dependencies import get_db
@@ -63,23 +66,66 @@ class ApiTest(unittest.TestCase):
 
         app.dependency_overrides[get_db] = override_get_db
         self.client = TestClient(app)
+        # 每个用例重置限流/锁定状态, 避免相互干扰
+        app.state.login_guard.reset()
         self.token = self._register()
         self.auth = {"Authorization": "Bearer " + self.token}
 
+    def _enc_password(self, plain: str) -> str:
+        """模拟前端: 取公钥 → RSA-OAEP(SHA-256) 加密 → base64。"""
+        r = self.client.get("/api/v1/auth/public-key")
+        self.assertEqual(r.status_code, 200)
+        pub = serialization.load_pem_public_key(r.json()["public_key"].encode())
+        ct = pub.encrypt(
+            plain.encode("utf-8"),
+            asym_padding.OAEP(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+        return base64.b64encode(ct).decode()
+
     def _register(self, username="alice", password="password123") -> str:
         r = self.client.post("/api/v1/auth/register", json={
-            "username": username, "email": "{}@x.com".format(username), "password": password})
+            "username": username, "email": "{}@x.com".format(username),
+            "password": self._enc_password(password)})
         self.assertEqual(r.status_code, 201, r.text)
         return r.json()["access_token"]
 
     # ---- 认证 ----
     def test_login_and_me(self):
         r = self.client.post("/api/v1/auth/login", json={
-            "username": "alice", "password": "password123"})
+            "username": "alice", "password": self._enc_password("password123")})
         self.assertEqual(r.status_code, 200)
         me = self.client.get("/api/v1/auth/me", headers=self.auth)
         self.assertEqual(me.status_code, 200)
         self.assertEqual(me.json()["username"], "alice")
+
+    def test_plaintext_password_rejected(self):
+        # 未加密的明文密码必须被拒绝, 请求体不得接受明文
+        r = self.client.post("/api/v1/auth/login", json={
+            "username": "alice", "password": "password123"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "PASSWORD_ENCRYPTION_INVALID")
+
+    def test_weak_password_rejected(self):
+        r = self.client.post("/api/v1/auth/register", json={
+            "username": "weakuser", "email": "weak@x.com",
+            "password": self._enc_password("short1")})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["code"], "WEAK_PASSWORD")
+
+    def test_login_lockout_after_consecutive_failures(self):
+        # 连续 5 次密码错误 → 账号锁定; 第 6 次即使密码正确也返回 429
+        for _ in range(5):
+            r = self.client.post("/api/v1/auth/login", json={
+                "username": "alice", "password": self._enc_password("wrongpass9")})
+            self.assertEqual(r.status_code, 401)
+        locked = self.client.post("/api/v1/auth/login", json={
+            "username": "alice", "password": self._enc_password("password123")})
+        self.assertEqual(locked.status_code, 429)
+        self.assertEqual(locked.json()["code"], "ACCOUNT_LOCKED")
 
     def test_unauthorized_rejected(self):
         r = self.client.get("/api/v1/auth/me")
@@ -107,7 +153,8 @@ class ApiTest(unittest.TestCase):
 
         # 越权访问他人项目
         self._register("bob")
-        bob = self.client.post("/api/v1/auth/login", json={"username": "bob", "password": "password123"})
+        bob = self.client.post("/api/v1/auth/login", json={
+            "username": "bob", "password": self._enc_password("password123")})
         bob_auth = {"Authorization": "Bearer " + bob.json()["access_token"]}
         rb2 = self.client.get("/api/v1/projects/{}".format(pid), headers=bob_auth)
         self.assertEqual(rb2.status_code, 404)

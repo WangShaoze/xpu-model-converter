@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "XPU Model Hub",
+  title: "Model Converter Hub",
   description: "模型转换 Web SaaS: PyTorch → ONNX → 昆仑芯 XPU → Docker 交付包",
 };
 

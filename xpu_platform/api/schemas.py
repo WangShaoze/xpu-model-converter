@@ -23,12 +23,19 @@ class TokenResponse(BaseModel):
 class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=64)
     email: str
-    password: str = Field(min_length=8, max_length=128)
+    # 此处为前端 RSA-OAEP 加密后的 base64 密文(RSA2048 ≈ 344 字符),
+    # 明文密码策略在后端解密后校验, 见 crypto.validate_password_policy
+    password: str = Field(min_length=8, max_length=512)
 
 
 class LoginRequest(BaseModel):
     username: str
-    password: str
+    password: str = Field(min_length=8, max_length=512)
+
+
+class PublicKeyOut(BaseModel):
+    public_key: str
+    algorithm: str = "RSA-OAEP-256"
 
 
 class ProjectCreate(BaseModel):

@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     max_upload_mb: int = 200
     allowed_extensions: str = ".pt,.pth,.onnx"
 
+    # 登录密码传输加密: RSA-OAEP(SHA-256) 应用层加密(HTTPS 之外的纵深防御)。
+    # 开发环境私钥文件缺失时自动生成; 生产必须通过 AUTH_RSA_KEY_PATH 注入持久化密钥,
+    # 且该文件权限 0600、不入 Git。
+    auth_rsa_key_path: str = "./dev-auth-key.pem"
+
+    # /auth/* 防暴力破解: 同一 IP 登录请求窗口上限; 同账号连续失败锁定
+    login_rate_per_minute: int = 10
+    login_max_failures: int = 5
+    login_lock_minutes: int = 15
+    register_rate_per_hour: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:

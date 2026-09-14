@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { ApiError, registerUser } from "@/lib/api";
+import { passwordPolicyError } from "@/lib/crypto";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -20,6 +21,11 @@ export default function RegisterPage() {
   async function onSubmit(e: { preventDefault: () => void }) {
     e.preventDefault();
     setError("");
+    const policyError = passwordPolicyError(password);
+    if (policyError) {
+      setError(policyError);
+      return;
+    }
     setBusy(true);
     try {
       await registerUser({ username, email, password });
@@ -34,7 +40,7 @@ export default function RegisterPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-neutral-50 px-4">
       <Card className="w-full max-w-sm">
-        <CardHeader title="注册账号" description="创建 XPU Model Hub 账号" />
+        <CardHeader title="注册账号" description="创建 Model Converter Hub 账号" />
         <CardContent>
           <form onSubmit={onSubmit} className="space-y-4">
             <div>
@@ -65,8 +71,12 @@ export default function RegisterPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 minLength={8}
+                autoComplete="new-password"
                 required
               />
+              <p className="mt-1 text-xs text-neutral-400">
+                8-128 位, 需至少包含一个字母和一个数字
+              </p>
             </div>
             {error && <p className="text-sm text-red-600">{error}</p>}
             <Button type="submit" className="w-full" disabled={busy}>

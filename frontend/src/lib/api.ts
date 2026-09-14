@@ -1,5 +1,6 @@
 // API 客户端: 统一 BASE URL / Token 注入 / 错误归一化(§42 错误格式)。
 import type { ApiErrorBody, TokenResponse, User } from "./types";
+import { encryptPassword } from "./crypto";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -159,14 +160,18 @@ export async function downloadArtifact(
   URL.revokeObjectURL(url);
 }
 
-/** 注册/登录共用封装。 */
+/** 注册/登录共用封装。密码先经 RSA-OAEP 公钥加密, 请求体不含明文。 */
 export async function authenticate(
   path: "/auth/login" | "/auth/register",
   payload: Record<string, string>,
 ): Promise<TokenResponse> {
+  const body = { ...payload };
+  if (typeof body.password === "string") {
+    body.password = await encryptPassword(body.password);
+  }
   const data = await api<TokenResponse>(`/api/v1${path}`, {
     method: "POST",
-    body: payload,
+    body,
     token: null,
   });
   setAuth(data.access_token, data.user);
@@ -175,9 +180,13 @@ export async function authenticate(
 
 /** 仅注册(不自动登录): 注册成功后应跳转登录页, 由用户主动登录。 */
 export async function registerUser(payload: Record<string, string>): Promise<TokenResponse> {
+  const body = { ...payload };
+  if (typeof body.password === "string") {
+    body.password = await encryptPassword(body.password);
+  }
   return api<TokenResponse>("/api/v1/auth/register", {
     method: "POST",
-    body: payload,
+    body,
     token: null,
   });
 }

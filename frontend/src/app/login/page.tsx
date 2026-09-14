@@ -37,7 +37,7 @@ function LoginForm() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-neutral-50 px-4">
       <Card className="w-full max-w-sm">
-        <CardHeader title="登录 XPU Model Hub" description="模型转换 Web SaaS 控制台" />
+        <CardHeader title="登录 Model Converter Hub" description="模型转换 Web SaaS 控制台" />
         <CardContent>
           {registered && (
             <p className="mb-4 rounded-md bg-green-50 px-3 py-2 text-sm text-green-700">

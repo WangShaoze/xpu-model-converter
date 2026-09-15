@@ -9,7 +9,15 @@
 - :mod:`events`         : EventSink —— 结构化事件流(CLI/Web/测试复用)
 - :mod:`converter`      : 把 Pipeline 接入 Context 并产出可审计 manifest
 """
-from xpu_converter.engine.artifact_store import ArtifactStore, LocalArtifactStore
+from xpu_converter.engine.artifact_store import (
+    ArtifactStore,
+    InvalidArtifactKey,
+    LocalArtifactStore,
+    MinioArtifactStore,
+    PresignedUrlStore,
+    create_artifact_store,
+    guess_mime,
+)
 from xpu_converter.engine.context import ConversionContext, new_context
 from xpu_converter.engine.events import (
     Event,
@@ -17,11 +25,18 @@ from xpu_converter.engine.events import (
     CollectingEventSink,
     ConsoleEventSink,
 )
-from xpu_converter.engine.stage import ConversionJob, JobStage, JobStatus, StageStatus
+from xpu_converter.engine.stage import (
+    ConversionJob,
+    InvalidTransitionError,
+    JobStage,
+    JobStatus,
+    StageStatus,
+)
 
 __all__ = [
-    "ArtifactStore", "LocalArtifactStore",
+    "ArtifactStore", "LocalArtifactStore", "MinioArtifactStore", "PresignedUrlStore",
+    "create_artifact_store", "guess_mime", "InvalidArtifactKey",
     "ConversionContext", "new_context",
     "Event", "EventSink", "CollectingEventSink", "ConsoleEventSink",
-    "ConversionJob", "JobStage", "JobStatus", "StageStatus",
+    "ConversionJob", "JobStage", "JobStatus", "StageStatus", "InvalidTransitionError",
 ]

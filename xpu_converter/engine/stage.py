@@ -4,7 +4,8 @@
 定义 Job 与 Stage 的状态流转, 供 Worker / API / 前端共享同一套状态语义:
 
 - Job:   CREATED -> QUEUED -> RUNNING -> SUCCESS / FAILED; RUNNING -> CANCEL_REQUESTED -> CANCELLED
-- Stage: PENDING -> RUNNING -> SUCCESS / FAILED / SKIPPED
+- Stage: PENDING -> RUNNING -> SUCCESS / FAILED / SKIPPED / CANCELLED
+- 所有迁移经过合法迁移表校验, 非法迁移抛 :class:`InvalidTransitionError`
 """
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,6 +29,33 @@ class StageStatus(str, Enum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
+    CANCELLED = "CANCELLED"
+
+
+class InvalidTransitionError(ValueError):
+    """非法状态迁移(§6: 例如 SUCCESS -> RUNNING 禁止)。"""
+
+
+# Job 合法迁移表: 目标状态集合
+_JOB_TRANSITIONS = {
+    JobStatus.CREATED: {JobStatus.QUEUED},
+    JobStatus.QUEUED: {JobStatus.RUNNING},
+    JobStatus.RUNNING: {JobStatus.SUCCESS, JobStatus.FAILED, JobStatus.CANCEL_REQUESTED},
+    JobStatus.CANCEL_REQUESTED: {JobStatus.CANCELLED},
+    JobStatus.SUCCESS: set(),
+    JobStatus.FAILED: set(),
+    JobStatus.CANCELLED: set(),
+}
+
+# Stage 合法迁移表
+_STAGE_TRANSITIONS = {
+    StageStatus.PENDING: {StageStatus.RUNNING},
+    StageStatus.RUNNING: {StageStatus.SUCCESS, StageStatus.FAILED, StageStatus.SKIPPED, StageStatus.CANCELLED},
+    StageStatus.SUCCESS: set(),
+    StageStatus.FAILED: set(),
+    StageStatus.SKIPPED: set(),
+    StageStatus.CANCELLED: set(),
+}
 
 
 def _now() -> str:
@@ -48,17 +76,31 @@ class JobStage:
     metrics: Dict[str, Any] = field(default_factory=dict)
     error_message: str = ""
 
+    def _transition(self, target: "StageStatus") -> "StageStatus":
+        allowed = _STAGE_TRANSITIONS.get(self.status, set())
+        if target not in allowed:
+            raise InvalidTransitionError(
+                "非法 Stage 状态迁移: {} -> {}".format(self.status.value, target.value))
+        self.status = target
+        return self.status
+
     def start(self) -> "JobStage":
-        self.status = StageStatus.RUNNING
+        self._transition(StageStatus.RUNNING)
         self.started_at = _now()
         self.progress = 0
         return self
 
     def finish(self, status: StageStatus = StageStatus.SUCCESS, error: str = "") -> "JobStage":
-        self.status = status
+        self._transition(status)
         self.finished_at = _now()
         self.progress = 100 if status in (StageStatus.SUCCESS, StageStatus.SKIPPED) else self.progress
         self.error_message = error
+        return self
+
+    def cancel(self) -> "JobStage":
+        self._transition(StageStatus.CANCELLED)
+        self.finished_at = _now()
+        self.error_message = "cancelled"
         return self
 
     def to_dict(self) -> Dict[str, Any]:
@@ -88,24 +130,41 @@ class ConversionJob:
     finished_at: Optional[str] = None
     payload: Dict[str, Any] = field(default_factory=dict)
 
+    def _transition(self, target: "JobStatus") -> "JobStatus":
+        allowed = _JOB_TRANSITIONS.get(self.status, set())
+        if target not in allowed:
+            raise InvalidTransitionError(
+                "非法 Job 状态迁移: {} -> {}".format(self.status.value, target.value))
+        self.status = target
+        return self.status
+
     def queue(self) -> "ConversionJob":
-        self.status = JobStatus.QUEUED
+        self._transition(JobStatus.QUEUED)
         return self
 
     def run(self) -> "ConversionJob":
-        self.status = JobStatus.RUNNING
+        self._transition(JobStatus.RUNNING)
         self.started_at = self.started_at or _now()
         return self
 
     def succeed(self) -> "ConversionJob":
-        self.status = JobStatus.SUCCESS
+        self._transition(JobStatus.SUCCESS)
         self.finished_at = _now()
         return self
 
     def fail(self, error: str = "") -> "ConversionJob":
-        self.status = JobStatus.FAILED
+        self._transition(JobStatus.FAILED)
         self.finished_at = _now()
         self.payload["error_message"] = error
+        return self
+
+    def request_cancel(self) -> "ConversionJob":
+        self._transition(JobStatus.CANCEL_REQUESTED)
+        return self
+
+    def cancel(self) -> "ConversionJob":
+        self._transition(JobStatus.CANCELLED)
+        self.finished_at = _now()
         return self
 
     def to_dict(self) -> Dict[str, Any]:

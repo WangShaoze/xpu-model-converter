@@ -5,11 +5,14 @@
 流水线的 10 个步骤翻译成 JobStage 状态、落盘每阶段产物并发出结构化事件, 产出
 一份可审计的 conversion-manifest, 供前端 Job Detail 页直接渲染。
 """
+from pathlib import Path
 from typing import Any, Dict, List
 
 from xpu_converter.engine import events
+from xpu_converter.engine.artifact_store import sha256_of
 from xpu_converter.engine.context import ConversionContext
 from xpu_converter.engine.stage import ConversionJob, JobStage, StageStatus
+from xpu_converter.version import CONVERTER_VERSION
 
 # 阶段 key / 产物类型(与 Pipeline STEP_TITLES 顺序一一对应)
 _STAGE_SPECS = [
@@ -100,15 +103,37 @@ def run_pipeline(context: ConversionContext, pipeline):
         reports["benchmark"] = result.benchmark.to_dict()
 
     all_ok = bool(steps) and all(step.get("ok") for step in steps)
+    source_sha256 = ""
+    if context.source_model and Path(context.source_model).is_file():
+        source_sha256 = sha256_of(str(context.source_model))
+    runtime = {}
+    if getattr(result, "artifact", None) is not None:
+        artifact = result.artifact
+        runtime = {
+            "type": getattr(artifact, "sdk_adapter", "") or "paddle",
+            "hardware": getattr(result, "hardware", "") or "",
+            "degraded": bool(getattr(result, "degraded", False)),
+        }
     manifest = {
         "job_id": context.job_id,
         "status": ("success" if all_ok else "failed") if not error else "failed",
+        "pipeline_version": getattr(pipeline, "PIPELINE_VERSION", "10-stage"),
+        "converter_version": CONVERTER_VERSION,
+        "source_model": str(context.source_model),
+        "source_sha256": source_sha256,
+        "config": dict(context.config),
         "model": getattr(result, "model_path", ""),
         "error": error,
         "stages": [stage.to_dict() for stage in job.stages],
-        "reports": reports,
         "artifacts": saved,
+        "validation": reports.get("accuracy", {}),
+        "benchmark": reports.get("benchmark", {}),
+        "reports": reports,
+        "runtime": runtime,
+        "worker": {},
         "degraded": bool(getattr(result, "degraded", False)),
+        "created_at": job.created_at,
+        "finished_at": job.finished_at,
     }
 
     if all_ok and not error:

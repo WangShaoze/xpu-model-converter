@@ -1,0 +1,32 @@
+# 生产网关 TLS 示例(§46): Caddy 自动申请/续期 Let's Encrypt 证书,
+# 全站强制 HTTPS, 并反向代理 API 与 Next.js 前端。
+#
+# 部署:
+#   1. 将 hub.example.com 替换为真实域名(解析到本机);
+#   2. 后端: uvicorn xpu_platform.api.main:app --host 127.0.0.1 --port 8000
+#      前端: NEXT_PUBLIC_API_BASE_URL=https://hub.example.com npm run start -- --port 3000
+#   3. caddy run --config deploy/Caddyfile
+#
+# 安全模型: TLS 保证传输层加密(密码不可被窃听/篡改);
+# 应用层 RSA-OAEP 密码加密作为纵深防御(防止日志/代理泄露明文)。
+
+hub.example.com {
+	# 压缩与基础安全响应头
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# CORS 由 FastAPI 处理; 生产建议把 allow_origins 收敛为本域名
+	}
+
+	# API / SSE / 文档 → FastAPI。flush_interval=-1 保证 SSE 实时下发
+	@api path /api/* /docs /openapi.json
+	reverse_proxy @api 127.0.0.1:8000 {
+		flush_interval -1
+	}
+
+	# 其余路径 → Next.js
+	reverse_proxy 127.0.0.1:3000
+}

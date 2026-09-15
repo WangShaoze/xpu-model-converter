@@ -1,0 +1,195 @@
+# Phase 7 §40 完整开发链路(所有服务/容器均以 xpu-model-converter- 开头):
+#
+#   Browser → xpu-model-converter-frontend(Next.js)
+#          → xpu-model-converter-api(FastAPI)
+#          → xpu-model-converter-postgres / xpu-model-converter-redis
+#          → xpu-model-converter-worker → Engine → xpu-model-converter-minio
+#
+# 一键启动:  docker compose up --build
+# 前端:      http://localhost:3000   API 文档: http://localhost:8000/docs
+# MinIO 控制台: http://localhost:9001 (MINIO_ROOT_USER / MINIO_ROOT_PASSWORD)
+#
+# 配置: 复制 .env.example 为 .env 后按需修改; 不复制也可用文件内默认值直接起。
+# 真实 XPU Worker 不包含在本编排(无昆仑 SDK/硬件), 见 deploy/docker-compose.xpu.yml。
+
+name: xpu-model-converter
+
+services:
+  # ---- PostgreSQL 16 ----
+  xpu-model-converter-postgres:
+    image: postgres:16-alpine
+    container_name: xpu-model-converter-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-xpu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xpu_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-xpu}
+    volumes:
+      - xpu-model-converter-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-xpu} -d ${POSTGRES_DB:-xpu}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - xpu-model-converter-net
+
+  # ---- Redis 7(任务队列) ----
+  xpu-model-converter-redis:
+    image: redis:7-alpine
+    container_name: xpu-model-converter-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - xpu-model-converter-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - xpu-model-converter-net
+
+  # ---- MinIO(产物对象存储) ----
+  xpu-model-converter-minio:
+    image: minio/minio:latest
+    container_name: xpu-model-converter-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-xpu_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-xpu_minio_dev_password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - xpu-model-converter-miniodata:/data
+    networks:
+      - xpu-model-converter-net
+
+  # ---- MinIO 一次性初始化: 建 bucket(完成后退出, 作为 api/worker 的就绪门闩) ----
+  xpu-model-converter-minio-init:
+    image: minio/mc:latest
+    container_name: xpu-model-converter-minio-init
+    depends_on:
+      - xpu-model-converter-minio
+    # 注意: 必须单行传给 sh -c(YAML 折叠标量对更深缩进行会保留换行, 会把凭证拆行)
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - "until mc alias set local http://xpu-model-converter-minio:9000 '${MINIO_ROOT_USER:-xpu_minio}' '${MINIO_ROOT_PASSWORD:-xpu_minio_dev_password}' 2>/dev/null; do echo 'waiting minio...'; sleep 1; done; mc mb --ignore-existing local/${MINIO_BUCKET:-xpu-models}; echo 'minio bucket ready'"
+    networks:
+      - xpu-model-converter-net
+
+  # ---- FastAPI(迁移 + 认证 + 资源端点 + SSE) ----
+  xpu-model-converter-api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.platform
+    image: xpu-model-converter-platform:latest
+    container_name: xpu-model-converter-api
+    restart: unless-stopped
+    command: ["uvicorn", "xpu_platform.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-xpu}:${POSTGRES_PASSWORD:-xpu_dev_password}@xpu-model-converter-postgres:5432/${POSTGRES_DB:-xpu}
+      REDIS_URL: redis://xpu-model-converter-redis:6379/0
+      QUEUE_BACKEND: redis
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: xpu-model-converter-minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-xpu_minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-xpu_minio_dev_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-xpu-models}
+      MINIO_SECURE: "false"
+      WORKSPACE_ROOT: /workspace
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-please-0123456789abcdef}
+      AUTH_RSA_KEY_PATH: /workspace/dev-auth-key.pem
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - xpu-model-converter-workspace:/workspace
+    depends_on:
+      xpu-model-converter-postgres:
+        condition: service_healthy
+      xpu-model-converter-redis:
+        condition: service_healthy
+      xpu-model-converter-minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 8s
+      timeout: 4s
+      retries: 15
+      start_period: 20s
+    networks:
+      - xpu-model-converter-net
+
+  # ---- Worker(消费 Redis 队列, Engine 产物落 MinIO) ----
+  xpu-model-converter-worker:
+    image: xpu-model-converter-platform:latest
+    container_name: xpu-model-converter-worker
+    restart: unless-stopped
+    command:
+      - "xpu-worker"
+      - "--device-type"
+      - "cpu"
+      - "--chip"
+      - "CPU-STUB"
+      - "--poll-interval"
+      - "1"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-xpu}:${POSTGRES_PASSWORD:-xpu_dev_password}@xpu-model-converter-postgres:5432/${POSTGRES_DB:-xpu}
+      REDIS_URL: redis://xpu-model-converter-redis:6379/0
+      QUEUE_BACKEND: redis
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: xpu-model-converter-minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-xpu_minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-xpu_minio_dev_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-xpu-models}
+      MINIO_SECURE: "false"
+      WORKSPACE_ROOT: /workspace
+      XPU_WORKER_ID: xpu-model-converter-worker-cpu-01
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - xpu-model-converter-workspace:/workspace
+    depends_on:
+      xpu-model-converter-api:
+        condition: service_healthy
+      xpu-model-converter-minio-init:
+        condition: service_completed_successfully
+    networks:
+      - xpu-model-converter-net
+
+  # ---- Next.js 前端 ----
+  xpu-model-converter-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # 浏览器在宿主机访问, 指向映射出来的 API 端口
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    image: xpu-model-converter-frontend:latest
+    container_name: xpu-model-converter-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      xpu-model-converter-api:
+        condition: service_healthy
+    networks:
+      - xpu-model-converter-net
+
+volumes:
+  xpu-model-converter-pgdata:
+    name: xpu-model-converter-pgdata
+  xpu-model-converter-redisdata:
+    name: xpu-model-converter-redisdata
+  xpu-model-converter-miniodata:
+    name: xpu-model-converter-miniodata
+  xpu-model-converter-workspace:
+    name: xpu-model-converter-workspace
+
+networks:
+  xpu-model-converter-net:
+    name: xpu-model-converter-net
+    driver: bridge

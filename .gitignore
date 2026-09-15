@@ -25,6 +25,11 @@ worker-workspace/
 
 # 认证 RSA 私钥(登录密码传输加密): 仅本地开发自动生成, 严禁入库
 dev-auth-key.pem
+
+# 环境密钥文件(含数据库/MinIO/JWT 等 Secret): 仅 .env.example 模板入库
+.env
+.env.local
+.env.*.local
 # 开发环境 TLS 自签证书(scripts/dev-tls.sh 生成)
 dev-certs/
 

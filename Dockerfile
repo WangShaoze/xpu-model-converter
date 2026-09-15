@@ -17,7 +17,11 @@ RUN pip install --no-cache-dir \
         "onnx>=1.12" "onnxruntime>=1.13"
 
 # PyTorch(CPU 版) 用于 PyTorch 前端导出 ONNX
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=1.13"
+# 额外索引供构建依赖回退; 上限 <2.8 因 cp310 更高版本无预编译 wheel(会退 sdist 构建失败)
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        "torch>=1.13,<2.8"
 
 COPY pyproject.toml README.md ./
 COPY xpu_converter/ ./xpu_converter/

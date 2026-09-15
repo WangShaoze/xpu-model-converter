@@ -26,3 +26,6 @@ class ConversionJob(IdMixin, Base):
     error_code: Mapped[str] = mapped_column(String(64), default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
     worker_id: Mapped[str] = mapped_column(String(64), default="")
+    # §48 缓存指纹: source_sha256 + pipeline_version + config_hash + converter_version
+    # 用于后续 Artifact 复用(相同 fingerprint 的 Job 可跳过重复转换)
+    conversion_fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)

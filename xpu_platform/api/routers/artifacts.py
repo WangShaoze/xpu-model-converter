@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""产物路由(Phase 5 §29 / Phase 7): 列表 / 详情 / 下载(local 卷或 MinIO 流式)。"""
+"""产物路由(Phase 5 §29 / Phase 7 / §47 安全下载): 列表 / 详情 / 下载。
+
+§47 下载安全门禁: 禁止下载 FAILED / DEGRADED / UNVERIFIED 状态的产物。
+"""
 import mimetypes
 from pathlib import Path
 from typing import List
@@ -17,6 +20,9 @@ from xpu_platform.db.repositories import AuditLogRepository, ProjectRepository
 from xpu_platform.storage_factory import build_artifact_store
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
+
+# §47 禁止下载的 Job 状态: 非 SUCCESS 一律拒绝
+_DOWNLOAD_BLOCKED_STATUS = {"FAILED", "CANCELLED", "QUEUED", "RUNNING", "CREATED"}
 
 
 def _owned_artifact(artifact_id: str, db: Session, owner_id: str) -> Artifact:
@@ -51,6 +57,22 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db), current_user=D
 def download_artifact(artifact_id: str, db: Session = Depends(get_db),
                       current_user=Depends(get_current_user)):
     artifact = _owned_artifact(artifact_id, db, current_user.id)
+
+    # §47 安全门禁: 检查所属 Job 状态, 非 SUCCESS 拒绝下载
+    job = db.get(ConversionJob, artifact.job_id)
+    if job is None or job.status in _DOWNLOAD_BLOCKED_STATUS:
+        raise HTTPException(403, detail={
+            "code": "DOWNLOAD_FORBIDDEN",
+            "message": "产物未通过校验或任务未完成, 禁止下载(状态: {})".format(
+                job.status if job else "UNKNOWN")})
+
+    # §47 degraded 检查: config 中标记降级的产物禁止下载
+    job_config = job.config or {}
+    if job_config.get("degraded") or job_config.get("allow_degraded"):
+        raise HTTPException(403, detail={
+            "code": "DOWNLOAD_FORBIDDEN",
+            "message": "产物为降级占位产物(DEGRADED), 禁止作为正式部署包下载"})
+
     settings = get_settings()
     storage = Path(artifact.storage_key)
     media_type = artifact.mime_type or mimetypes.guess_type(artifact.filename)[0] or "application/octet-stream"

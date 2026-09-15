@@ -104,6 +104,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-please-0123456789abcdef}
       AUTH_RSA_KEY_PATH: /workspace/dev-auth-key.pem
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-1800}
     ports:
       - "8000:8000"
     volumes:
@@ -121,6 +122,11 @@ services:
       timeout: 4s
       retries: 15
       start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "2.0"
     networks:
       - xpu-model-converter-net
 
@@ -150,6 +156,7 @@ services:
       WORKSPACE_ROOT: /workspace
       XPU_WORKER_ID: xpu-model-converter-worker-cpu-01
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-1800}
     volumes:
       - xpu-model-converter-workspace:/workspace
     depends_on:
@@ -157,6 +164,11 @@ services:
         condition: service_healthy
       xpu-model-converter-minio-init:
         condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "4.0"
     networks:
       - xpu-model-converter-net
 
@@ -176,6 +188,11 @@ services:
     depends_on:
       xpu-model-converter-api:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
     networks:
       - xpu-model-converter-net
 

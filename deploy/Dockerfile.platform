@@ -41,7 +41,11 @@ COPY examples/ ./examples/
 # 平台依赖: API + DB(Postgres) + Redis 队列 + MinIO 存储
 RUN pip install --no-cache-dir -e ".[api,db,queue,storage]"
 
-RUN mkdir -p /workspace
+RUN mkdir -p /workspace \
+    && groupadd -r xpu && useradd -r -g xpu -m -d /home/xpu xpu \
+    && chown -R xpu:xpu /app /workspace
+
+USER xpu
 
 EXPOSE 8000
 # 默认启动 API; compose 的 worker 服务覆盖为 xpu-worker

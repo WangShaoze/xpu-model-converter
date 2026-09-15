@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # 上传限制(§46): 大小与扩展名白名单
     max_upload_mb: int = 200
     allowed_extensions: str = ".pt,.pth,.onnx"
+    # MIME 白名单(§46): content_type 前缀匹配, 防止扩展名伪造
+    allowed_mime_types: str = "application/octet-stream,application/x-python-code,application/zip,model/pytorch,model/onnx"
+
+    # Job 执行超时(§46): wall-clock 秒, 0 表示不限制
+    job_timeout_seconds: int = 1800  # 30 分钟
 
     # 登录密码传输加密: RSA-OAEP(SHA-256) 应用层加密(HTTPS 之外的纵深防御)。
     # 开发环境私钥文件缺失时自动生成; 生产必须通过 AUTH_RSA_KEY_PATH 注入持久化密钥,

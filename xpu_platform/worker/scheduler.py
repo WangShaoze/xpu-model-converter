@@ -26,6 +26,7 @@ class WorkerScheduler:
         workspace_root: str,
         artifact_store=None,
         max_retries: int = 2,
+        job_timeout_seconds: int = 0,
     ) -> None:
         self.queue = queue
         self.session_factory = session_factory
@@ -34,6 +35,7 @@ class WorkerScheduler:
         self.workspace_root = workspace_root
         self.artifact_store = artifact_store
         self.max_retries = max_retries
+        self.job_timeout_seconds = job_timeout_seconds
         self._retries: Dict[str, int] = {}
 
     # ---- 心跳 ----
@@ -65,6 +67,7 @@ class WorkerScheduler:
             result = run_job(
                 job_id, self.session_factory, self.pipeline_factory, self.worker,
                 self.workspace_root, self.artifact_store,
+                timeout_seconds=self.job_timeout_seconds,
             )
             self.queue.ack(job_id)
             self._retries.pop(job_id, None)

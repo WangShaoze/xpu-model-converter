@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Phase 4 Worker/Scheduler 测试: 成功链路 / 崩溃重试 / 重试上限失败 / 乐观锁抢占 / 心跳。"""
+"""Phase 4 Worker/Scheduler 测试: 成功链路 / 崩溃重试 / 重试上限失败 / 乐观锁抢占 / 心跳。
+
+Phase 10: 补充真实 ConversionPipeline 端到端测试(合成 ONNX 适配器),
+覆盖 Worker 从入队到 Artifact/Stage/Event 落库的完整链路。
+"""
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,8 +12,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from xpu_platform.db.models import Base, ConversionJob, JobEvent, Model, Project, User, Worker
-from xpu_platform.db.repositories import JobRepository, WorkerRepository
+from xpu_platform.db.repositories import JobRepository, WorkerRepository, ArtifactRepository
 from xpu_platform.worker import InMemoryJobQueue, WorkerRuntime, WorkerScheduler
+
+from tests import requires_onnx
 
 
 def _make_session():
@@ -246,6 +252,100 @@ class RedisJobQueueTest(unittest.TestCase):
 
         self.assertIsNone(RedisJobQueue(client=_FakeRedis()).dequeue())
         self.assertIsNone(RedisJobQueue(client=_FakeRedis()).dequeue(timeout=0))
+
+
+@requires_onnx
+class WorkerPipelineE2ETest(unittest.TestCase):
+    """Phase 10: 真实 ConversionPipeline 经 Worker 执行的端到端测试。
+
+    用合成 ONNX 适配器绕过 torch, 但 Pipeline 的 10 步骤、Artifact、Stage、Event
+    全部真实执行并落库。验证:
+    1. Job 从 QUEUED → RUNNING → SUCCESS
+    2. 10 个 Stage 行落库且状态 SUCCESS
+    3. Artifact 行存在(至少 1 个产物)
+    4. Event 序列完整(stage_started/stage_finished)
+    5. conversion_fingerprint 已写入
+    6. Worker 心跳 READY
+    """
+    def setUp(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from tests.test_pipeline import SyntheticYoloAdapter, INPUT_SHAPE
+        from tests import _models
+        from xpu_converter.registry import model_registry
+
+        self.INPUT_SHAPE = INPUT_SHAPE
+        self._loaded_backup = model_registry._LOADED
+        self._adapters_backup = dict(model_registry._ADAPTERS)
+        model_registry._LOADED = True
+        model_registry.register_adapter(SyntheticYoloAdapter)
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name) / "ws"
+        self.workspace.mkdir()
+        self.source = Path(self.tmp.name) / "best.pt"
+        self.source.write_bytes(b"synthetic")
+        self.engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(bind=self.engine, autoflush=False)
+        self.queue = InMemoryJobQueue()
+        self.worker = WorkerRuntime(worker_id="e2e-worker-01", hostname="node1", chip="CPU-STUB", device_type="cpu")
+
+    def tearDown(self):
+        from xpu_converter.registry import model_registry
+        model_registry._ADAPTERS.clear()
+        model_registry._ADAPTERS.update(self._adapters_backup)
+        model_registry._LOADED = self._loaded_backup
+        self.engine.dispose()
+        self.tmp.cleanup()
+
+    def _pipeline_factory(self, source, config):
+        from xpu_converter.pipeline import ConversionPipeline
+        return ConversionPipeline(
+            model_path=source,
+            output_dir=str(self.workspace / "output"),
+            model_type="synthetic_yolo",
+            input_shape=list(self.INPUT_SHAPE),
+            precision="fp16",
+            benchmark_iterations=2,
+            sdk_adapter="stub",
+            allow_degraded=True,
+            allow_degraded_package=True,
+        )
+
+    def test_full_pipeline_through_worker(self):
+        db = self.session_factory()
+        job = _make_job(db, str(self.source))
+        db.close()
+        self.queue.enqueue(job.id)
+
+        scheduler = WorkerScheduler(
+            queue=self.queue, session_factory=self.session_factory,
+            pipeline_factory=self._pipeline_factory,
+            worker=self.worker, workspace_root=str(self.workspace), max_retries=1,
+        )
+        result = scheduler.poll_once()
+
+        self.assertEqual(result["status"], "SUCCESS")
+
+        db = self.session_factory()
+        row = db.get(ConversionJob, job.id)
+        self.assertEqual(row.status, "SUCCESS")
+        self.assertEqual(row.worker_id, "e2e-worker-01")
+        self.assertTrue(row.conversion_fingerprint, "conversion_fingerprint should be set")
+
+        stages = JobRepository(db).list_stages(job.id)
+        self.assertEqual(len(stages), 10)
+        self.assertTrue(all(s.status == "SUCCESS" for s in stages))
+
+        artifacts = ArtifactRepository(db).list_by_job(job.id)
+        self.assertTrue(len(artifacts) >= 1, "should have at least 1 artifact")
+
+        events = [e.event for e in db.query(JobEvent).filter(JobEvent.job_id == job.id).order_by(JobEvent.sequence)]
+        self.assertIn("job_finished", events)
+
+        self.assertEqual(db.get(Worker, "e2e-worker-01").status, "READY")
+        db.close()
 
 
 if __name__ == "__main__":

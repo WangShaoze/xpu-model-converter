@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from xpu_platform.db.models.base import Base
 from xpu_platform.db.session import create_engine_from_url, create_session_factory
+from xpu_platform.logging_config import setup_logging
 from xpu_platform.worker.executor import WorkerRuntime
 from xpu_platform.worker.queue import InMemoryJobQueue, RedisJobQueue
 from xpu_platform.worker.scheduler import WorkerScheduler
@@ -88,11 +89,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--max-iterations", type=int, default=None,
                         help="处理 N 个 Job 后退出(测试用); 缺省持续运行")
+    parser.add_argument("--job-timeout", type=int,
+                        default=int(os.environ.get("JOB_TIMEOUT_SECONDS", 0)),
+                        help="单个 Job wall-clock 超时秒(0=不限制, 默认读 JOB_TIMEOUT_SECONDS)")
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    setup_logging("worker")
     worker_id = args.worker_id or "xpu-worker-{}".format(args.hostname)
     worker = WorkerRuntime(
         worker_id=worker_id, hostname=args.hostname, device_type=args.device_type,
@@ -122,7 +127,7 @@ def main(argv=None) -> int:
     scheduler = WorkerScheduler(
         queue=queue, session_factory=session_factory, pipeline_factory=build_pipeline,
         worker=worker, workspace_root=args.workspace, artifact_store=artifact_store,
-        max_retries=args.max_retries,
+        max_retries=args.max_retries, job_timeout_seconds=args.job_timeout,
     )
     print("Worker 启动: id={} chip={} device={} queue={} workspace={}".format(
         worker_id, args.chip or "(auto)", args.device_id, args.queue, args.workspace))

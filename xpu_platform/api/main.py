@@ -32,8 +32,10 @@ from xpu_platform.api.routers import (
 from xpu_platform.db.models.base import Base
 from xpu_platform.db.session import create_engine_from_url, create_session_factory
 from xpu_platform.api.ratelimit import LoginGuard
+from xpu_platform.logging_config import setup_logging
 from xpu_platform.worker.queue import InMemoryJobQueue, JobQueue
 
+setup_logging("api")
 logger = logging.getLogger("xpu.api")
 settings = get_settings()
 

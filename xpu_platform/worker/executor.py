@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Worker 执行器(Phase 4 §22/§24)。
+"""Worker 执行器(Phase 4 §22/§24/§48)。
 
 流程: 取 Job → 读 DB 元数据 → 取源模型 → 隔离 workspace → 构造
 ConversionContext → run_pipeline → 落 Artifact → 更新 Stage → 更新 Job。
 Worker 不处理登录/权限/HTTP。
 """
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +25,19 @@ from xpu_converter.engine.converter import run_pipeline
 
 # pipeline_factory(model_path, config) -> ConversionPipeline 兼容对象
 PipelineFactory = Callable[[str, Dict[str, Any]], Any]
+
+
+def compute_fingerprint(source_sha256: str, pipeline_version: str,
+                        config: Dict[str, Any], converter_version: str = "") -> str:
+    """§48 缓存指纹: source_sha256 + pipeline_version + config_hash + converter_version。
+
+    相同 fingerprint 的 Job 可复用已有 Artifact, 跳过重复转换。
+    """
+    config_hash = hashlib.sha256(
+        json.dumps(config, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+    raw = "{}|{}|{}|{}".format(source_sha256, pipeline_version, config_hash, converter_version)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def parse_engine_ts(value: Optional[str]) -> Optional[datetime]:
@@ -84,10 +99,12 @@ def run_job(
     worker: WorkerRuntime,
     workspace_root: str,
     artifact_store=None,
+    timeout_seconds: int = 0,
 ) -> Dict[str, Any]:
     """执行单个 Job, 返回 ``{"status": ..., "manifest": ...}``。
 
     通过乐观锁 :meth:`JobRepository.claim` 抢占, 防双 Worker 同时执行。
+    ``timeout_seconds > 0`` 时, Pipeline 执行超过 wall-clock 即中断标记 FAILED(§46)。
     """
     db: Session = session_factory()
     try:
@@ -100,6 +117,17 @@ def run_job(
             return {"status": "SKIPPED"}  # 已被其它 Worker 抢占
 
         job_repo.update_status(job_id, "RUNNING", worker_id=worker.worker_id)
+
+        # §48 计算缓存指纹并写入
+        source_model = db.get(Model, job.source_model_id)
+        fingerprint = compute_fingerprint(
+            source_sha256=(source_model.sha256 if source_model else ""),
+            pipeline_version=job.pipeline_version,
+            config=dict(job.config),
+        )
+        job.conversion_fingerprint = fingerprint
+        db.commit()
+
         workspace = Path(workspace_root) / job_id
         workspace.mkdir(parents=True, exist_ok=True)
         source = fetch_source_model(db, job.source_model_id, workspace)
@@ -109,15 +137,37 @@ def run_job(
         ctx = new_context(job_id=job_id, workspace=str(workspace), source_model=str(source),
                           config=dict(job.config), event_sink=event_sink, artifact_store=store)
         pipeline = pipeline_factory(str(source), dict(job.config))
-        job_obj, manifest, _ = run_pipeline(ctx, pipeline)
 
-        # 落 Stage 行(10 阶段)
-        for stage in job_obj.stages:
-            row = job_repo.add_stage(job_id, stage.name, stage.index)
-            job_repo.update_stage(
-                row.id, status=stage.status.value, progress=stage.progress,
-                error_message=stage.error_message,
-            )
+        # §46 执行 timeout: signal.alarm 实现 wall-clock 中断(仅主线程, Unix only)
+        timed_out = False
+        if timeout_seconds and timeout_seconds > 0:
+            import signal
+
+            def _timeout_handler(signum, frame):
+                raise TimeoutError("Job 执行超时({}s)".format(timeout_seconds))
+
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(int(timeout_seconds))
+            try:
+                job_obj, manifest, _ = run_pipeline(ctx, pipeline)
+            except TimeoutError:
+                timed_out = True
+                job_obj = None
+                manifest = {"error": "Job 执行超时({}s)".format(timeout_seconds), "artifacts": {}}
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+        else:
+            job_obj, manifest, _ = run_pipeline(ctx, pipeline)
+
+        # 落 Stage 行(10 阶段) — timeout 时跳过, 已无 stage 对象
+        if job_obj is not None:
+            for stage in job_obj.stages:
+                row = job_repo.add_stage(job_id, stage.name, stage.index)
+                job_repo.update_stage(
+                    row.id, status=stage.status.value, progress=stage.progress,
+                    error_message=stage.error_message,
+                )
         # 落 Artifact 元数据行
         artifact_repo = ArtifactRepository(db)
         for atype, path in (manifest.get("artifacts") or {}).items():
@@ -146,10 +196,11 @@ def run_job(
             event_repo.append(job_id, ev.event, stage=ev.stage, message=ev.message,
                               progress=ev.progress, data=ev.data)
 
-        final_status = "SUCCESS" if job_obj.status.value == "SUCCESS" else "FAILED"
+        final_status = "SUCCESS" if (job_obj and job_obj.status.value == "SUCCESS") else "FAILED"
+        finished_at = parse_engine_ts(job_obj.finished_at) if job_obj else datetime.utcnow()
         job_repo.update_status(
             job_id, final_status,
-            finished_at=parse_engine_ts(job_obj.finished_at),
+            finished_at=finished_at,
             error_message=manifest.get("error", ""),
         )
         return {"status": final_status, "manifest": manifest}

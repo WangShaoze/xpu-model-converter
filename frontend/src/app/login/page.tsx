@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { ApiError } from "@/lib/api";
+import { passwordPolicyError } from "@/lib/crypto";
 
 function LoginForm() {
   const { login } = useAuth();
@@ -23,11 +24,18 @@ function LoginForm() {
   async function onSubmit(e: { preventDefault: () => void }) {
     e.preventDefault();
     setError("");
+    // 密码不符合策略时前端直接提示, 不发请求(与注册页规则一致)
+    const policyError = passwordPolicyError(password);
+    if (policyError) {
+      setError(policyError);
+      return;
+    }
     setBusy(true);
     try {
       await login(username, password);
       router.replace("/dashboard");
     } catch (err) {
+      // 401 用户名或密码错误 / 429 锁定或限流: 直接展示后端 message, 不再强制跳转
       setError(err instanceof ApiError ? err.message : "登录失败, 请重试");
     } finally {
       setBusy(false);

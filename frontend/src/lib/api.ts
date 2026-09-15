@@ -86,7 +86,10 @@ export async function api<T>(
   });
   if (!res.ok) {
     const err = await parseError(res);
-    if (err.status === 401 && !path.startsWith("/auth/")) {
+    // 仅对"会话失效"的 401 做登出跳转; 认证接口自身的 401(用户名或密码错误)
+    // 必须抛给登录页展示, 不能强制刷新(/api/v1/auth/login 也会命中此分支)。
+    const isAuthEndpoint = path.includes("/auth/login") || path.includes("/auth/register");
+    if (err.status === 401 && !isAuthEndpoint) {
       clearAuth();
       if (typeof window !== "undefined") window.location.href = "/login";
     }

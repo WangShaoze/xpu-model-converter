@@ -86,7 +86,10 @@ class RedisJobQueue(JobQueue):
             self.client.rpop(self.queue_key)
         if not item:
             return None
-        job_id = item[1] if isinstance(item, (list, tuple)) else item
+        raw = item[1] if isinstance(item, (list, tuple)) else item
+        # redis-py 默认返回 bytes; 统一在队列边界转 str, 否则 Postgres 会按 bytea
+        # 绑定与 varchar 主键比较报错(SQLite 类型亲和宽松, 不会暴露该问题)。
+        job_id = raw.decode("utf-8") if isinstance(raw, bytes) else raw
         self.client.sadd(self.processing_key, job_id)
         return job_id
 

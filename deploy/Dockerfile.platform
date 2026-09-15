@@ -1,0 +1,48 @@
+# xpu-model-converter API/Worker 共用运行镜像(Phase 7 §40)
+# docker compose 中 api 跑 uvicorn, worker 跑 xpu-worker, 其余层完全一致。
+#
+# 构建上下文为仓库根:
+#   docker build -f deploy/Dockerfile.platform -t xpu-model-converter-platform .
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    WORKSPACE_ROOT=/workspace
+
+WORKDIR /app
+
+# 系统依赖: curl 供容器健康检查; psycopg2-binary 为 wheel 无需 pg_config
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# PyTorch(CPU) 用于 PyTorch -> ONNX 导出(与仓库根 Dockerfile 保持一致, 单独一层利用缓存)
+# 主索引取 +cpu 预编译 wheel(同名本地版本号优先); 额外索引供构建依赖(flit_core 等)回退。
+# 上限 <2.8: cp310 在更高版本无预编译 wheel, pip 会退回 sdist 从源码构建而失败。
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        "torch>=1.13,<2.8"
+
+# 基础数值/ONNX 依赖
+RUN pip install --no-cache-dir \
+        "numpy>=1.21" "PyYAML>=5.4" "Jinja2>=3.0" \
+        "onnx>=1.12" "onnxruntime>=1.13"
+
+# 拷贝工程清单与源码(含 Alembic 迁移脚本, API lifespan 启动时执行)
+COPY pyproject.toml README.md ./
+COPY xpu_converter/ ./xpu_converter/
+COPY xpu_platform/ ./xpu_platform/
+COPY runtime/ ./runtime/
+COPY templates/ ./templates/
+COPY configs/ ./configs/
+COPY examples/ ./examples/
+
+# 平台依赖: API + DB(Postgres) + Redis 队列 + MinIO 存储
+RUN pip install --no-cache-dir -e ".[api,db,queue,storage]"
+
+RUN mkdir -p /workspace
+
+EXPOSE 8000
+# 默认启动 API; compose 的 worker 服务覆盖为 xpu-worker
+CMD ["uvicorn", "xpu_platform.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,95 @@
+# =============================================================================
+# 真实 XPU Worker 独立部署编排(Phase 7 §40)
+#
+# 主编排 docker-compose.yml 中的 xpu-model-converter-worker 是 CPU-STUB:
+# 通用 python:3.10-slim 镜像内没有昆仑 XPU SDK/驱动, 只能跑 CPU 占位链路。
+# 真实转换(actual_device=xpu)必须在装有昆仑 SDK/驱动的宿主机上, 用基于昆仑
+# 基础镜像的 Worker 独立部署, 与核心栈(Postgres/Redis/MinIO/API)通过网络连接。
+#
+# 前置条件:
+#   1. 宿主机已装昆仑 XPU 驱动, `ls /dev` 能看到 XPU 设备节点,
+#      并设置环境变量 XPU_DEVICE_NODE(见下, 默认 /dev/kunlun0, 按现场修改)。
+#   2. 宿主机备好 Worker 镜像 XPU_WORKER_IMAGE: 必须基于昆仑 SDK 基础镜像
+#      (见 configs/deployment/kunlun_docker.yaml 的 base_image)并安装本仓库
+#      平台包, 保证容器内有 xpu-worker 命令。最小 Dockerfile 示例:
+#        FROM iregistry.baidu-int.com/ai-station/kunlun2-paddlepaddle_2_6_1-py310-cv:v20260121
+#        COPY . /opt/xpu-model-converter
+#        WORKDIR /opt/xpu-model-converter
+#        RUN python3 -m pip install -e ".[api,db,queue,storage]"
+#        ENTRYPOINT ["xpu-worker"]
+#      构建: docker build -t xpu-model-converter-worker-xpu:latest -f <上面的Dockerfile> .
+#   3. XPU_SDK_VERSION / XPU_DRIVER_VERSION 必填(Benchmark/审计强制字段,
+#      缺失会导致校验结论 NOT_AVAILABLE)。
+#
+# 场景 A —— 同机部署(核心栈与 XPU 在同一台宿主机):
+#   先起核心栈:  docker compose up -d
+#   再起 XPU Worker:
+#     docker compose -f deploy/docker-compose.xpu.yml up -d
+#   本文件复用核心栈的外部网络 xpu-model-converter-net 与共享卷
+#   xpu-model-converter-workspace, 默认连接地址(服务名)无需修改。
+#
+# 场景 B —— 跨机部署(XPU 宿主机与核心栈分离):
+#   在 XPU 宿主机创建 .env(参考根目录 .env.example), 用可达的核心节点地址覆盖:
+#     DATABASE_URL=postgresql+psycopg2://xpu:<pwd>@<核心节点IP>:5432/xpu
+#     REDIS_URL=redis://<核心节点IP>:6379/0
+#     MINIO_ENDPOINT=<核心节点IP>:9000
+#   跨机没有同名 Docker 网络: 删除本文件 services 下的 networks: 段,
+#   或在同网段用 host 网络(network_mode: host)后启动。生产链路须加 TLS/鉴权。
+#
+# 所有容器/卷/网络名均以 xpu-model-converter- 开头。
+# =============================================================================
+
+name: xpu-model-converter
+
+services:
+  xpu-model-converter-worker-xpu:
+    image: ${XPU_WORKER_IMAGE:-xpu-model-converter-worker-xpu:latest}
+    container_name: xpu-model-converter-worker-xpu
+    restart: unless-stopped
+    command:
+      - "xpu-worker"
+      - "--device-type"
+      - "xpu"
+      - "--chip"
+      - "${XPU_CHIP:-KUNLUNXIN}"
+      - "--device-id"
+      - "${XPU_DEVICE_ID:-0}"
+      - "--sdk-version"
+      - "${XPU_SDK_VERSION:?必须在 .env 设置 XPU_SDK_VERSION(昆仑 SDK 版本)}"
+      - "--driver-version"
+      - "${XPU_DRIVER_VERSION:?必须在 .env 设置 XPU_DRIVER_VERSION(昆仑驱动版本)}"
+      - "--poll-interval"
+      - "1"
+    environment:
+      # 同机默认走核心栈服务名; 跨机用 .env 覆盖为核心节点可达地址
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://xpu:xpu_dev_password@xpu-model-converter-postgres:5432/xpu}
+      REDIS_URL: ${REDIS_URL:-redis://xpu-model-converter-redis:6379/0}
+      QUEUE_BACKEND: redis
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-xpu-model-converter-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-xpu_minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-xpu_minio_dev_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-xpu-models}
+      MINIO_SECURE: "false"
+      WORKSPACE_ROOT: /workspace
+      XPU_WORKER_ID: ${XPU_WORKER_ID:-xpu-model-converter-worker-xpu-01}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # 按宿主机实际设备节点调整 XPU_DEVICE_NODE(先 ls /dev 确认), 多卡时在此追加
+    devices:
+      - "${XPU_DEVICE_NODE:-/dev/kunlun0}:${XPU_DEVICE_NODE:-/dev/kunlun0}"
+    volumes:
+      # 同机: 复用核心栈具名卷(模型上传/Job 暂存与 API 共享);
+      # 跨机: 改为宿主机目录挂载, 并自行保证模型文件可达(大文件预签名直传为后续迭代)
+      - xpu-model-converter-workspace:/workspace
+    networks:
+      - xpu-model-converter-net
+
+volumes:
+  xpu-model-converter-workspace:
+    name: xpu-model-converter-workspace
+    external: true
+
+networks:
+  xpu-model-converter-net:
+    name: xpu-model-converter-net
+    external: true

@@ -1,0 +1,20 @@
+# 构建上下文为仓库根(deploy/Dockerfile.platform), 排除无关大目录
+.git
+.github
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.db
+*.sqlite3
+dev-auth-key.pem
+dev-certs/
+worker-workspace/
+output/
+output_seg/
+models/*
+!models/.gitkeep
+frontend/node_modules
+frontend/.next
+images/
+.codegraph/
+.venv/

@@ -181,5 +181,72 @@ class SchedulerTest(unittest.TestCase):
         db.close()
 
 
+class _FakeRedis:
+    """最小 redis-py 替身: 内部存 bytes, 复现真实客户端的 bytes 返回。"""
+
+    def __init__(self):
+        self.lists = {}
+        self.sets = {}
+
+    def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value.encode() if isinstance(value, str) else value)
+
+    def rpop(self, key):
+        values = self.lists.get(key)
+        return values.pop() if values else None
+
+    def brpop(self, keys, timeout=0):
+        for key in keys:
+            value = self.rpop(key)
+            if value is not None:
+                return key, value
+        return None
+
+    def sadd(self, key, *members):
+        bucket = self.sets.setdefault(key, set())
+        for member in members:
+            bucket.add(member)
+        return 1
+
+    def srem(self, key, *members):
+        bucket = self.sets.get(key, set())
+        for member in members:
+            bucket.discard(member)
+        return 1
+
+    def llen(self, key):
+        return len(self.lists.get(key, []))
+
+
+class RedisJobQueueTest(unittest.TestCase):
+    def test_dequeue_decodes_bytes_job_id(self):
+        # Phase 7: redis-py 默认返回 bytes, 不转 str 会导致 Postgres bytea 与 varchar 比较报错
+        from xpu_platform.worker.queue import RedisJobQueue
+
+        fake = _FakeRedis()
+        queue = RedisJobQueue(client=fake)
+        queue.enqueue("job-uuid-0123")
+
+        job_id = queue.dequeue()
+        self.assertEqual(job_id, "job-uuid-0123")
+        self.assertIsInstance(job_id, str)
+        # 处理集合中也应是 str(ack/requeue 后续按 str 操作)
+        self.assertIn("job-uuid-0123", fake.sets[queue.processing_key])
+
+    def test_blocking_dequeue_also_returns_str(self):
+        from xpu_platform.worker.queue import RedisJobQueue
+
+        fake = _FakeRedis()
+        queue = RedisJobQueue(client=fake)
+        queue.enqueue("job-uuid-4567")
+        self.assertEqual(queue.dequeue(timeout=1), "job-uuid-4567")
+
+    def test_empty_queue_returns_none(self):
+        from xpu_platform.worker.queue import RedisJobQueue
+
+        self.assertIsNone(RedisJobQueue(client=_FakeRedis()).dequeue())
+        self.assertIsNone(RedisJobQueue(client=_FakeRedis()).dequeue(timeout=0))
+
+
 if __name__ == "__main__":
     unittest.main()

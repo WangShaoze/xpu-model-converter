@@ -15,10 +15,13 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./dev.db"
     redis_url: str = "redis://localhost:6379/0"
+    # 任务队列后端: memory(单进程开发/测试) / redis(Docker Compose/生产)
+    queue_backend: str = "memory"
     minio_endpoint: str = ""
     minio_access_key: str = ""
     minio_secret_key: str = ""
     minio_bucket: str = "xpu-models"
+    minio_secure: bool = False
     storage_backend: str = "local"  # local / minio
 
     jwt_secret: str = "dev-only-secret-change-me-please-0123456789abcdef"  # ≥32B 生产必须覆盖

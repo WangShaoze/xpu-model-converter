@@ -122,9 +122,23 @@ def run_job(
         artifact_repo = ArtifactRepository(db)
         for atype, path in (manifest.get("artifacts") or {}).items():
             p = Path(path)
+            size = 0
+            storage_key = path
+            if p.is_file():
+                # local store: manifest 值为宿主机/共享卷绝对路径
+                size = p.stat().st_size
+            elif store is not None:
+                # minio store: manifest 值为对象 key, 大小走对象元数据查询
+                stat = getattr(store, "_stat", None)
+                if callable(stat):
+                    try:
+                        obj = stat(path)
+                        size = int(getattr(obj, "size", 0) or 0)
+                    except Exception:
+                        size = 0
             artifact_repo.create(
-                job_id=job_id, filename=p.name, storage_key=path, artifact_type=atype,
-                size=p.stat().st_size if p.is_file() else 0,
+                job_id=job_id, filename=p.name, storage_key=storage_key, artifact_type=atype,
+                size=size,
             )
         # 落 Event 行(sequence 严格递增)
         event_repo = JobEventRepository(db)

@@ -3,6 +3,7 @@
 // §38 任务详情: 基本信息 / Stage 时间线 / SSE 实时事件 / Artifacts 下载。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import { api, downloadArtifact } from "@/lib/api";
 import { useAuth } from "@/context/auth-context";
 import type { Artifact, Job } from "@/lib/types";
@@ -114,11 +115,21 @@ export default function JobDetailPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-neutral-900">
+          <Link href={`/jobs?project=${job.project_id}`} className="text-xs text-neutral-500 hover:underline">
+            ← 返回任务列表
+          </Link>
+          <h1 className="mt-1 text-xl font-semibold text-neutral-900">
             任务 {job.id.slice(0, 12)}
           </h1>
           <p className="mt-1 text-xs text-neutral-500">
-            项目 {job.project_id.slice(0, 8)} · 模型 {job.source_model_id.slice(0, 8)} · pipeline {job.pipeline_version}
+            <Link href={`/projects/${job.project_id}`} className="text-neutral-600 hover:underline">
+              项目 {job.project_id.slice(0, 8)}
+            </Link>
+            {" · "}
+            <Link href={`/projects/${job.project_id}`} className="text-neutral-600 hover:underline">
+              模型 {job.source_model_id.slice(0, 8)}
+            </Link>
+            {" · "}pipeline {job.pipeline_version}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -188,7 +199,7 @@ export default function JobDetailPage() {
       </div>
 
       <Card>
-        <CardHeader title="转换产物" description={`共 ${artifacts.length} 个产物`} />
+        <CardHeader title="③ 转换产物" description={`共 ${artifacts.length} 个产物 · 任务完成后可下载`} />
         <CardContent className="p-0">
           <Table>
             <THead>
@@ -203,8 +214,8 @@ export default function JobDetailPage() {
             <TBody>
               {artifacts.length === 0 && (
                 <tr>
-                  <Td colSpan={7} className="text-neutral-400">
-                    暂无产物
+                  <Td colSpan={7} className="py-6 text-center text-neutral-400">
+                    {job.status === "SUCCESS" ? "任务完成但无产物输出" : "任务完成后产物将显示在此处"}
                   </Td>
                 </tr>
               )}

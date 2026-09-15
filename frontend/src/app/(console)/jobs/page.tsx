@@ -2,6 +2,7 @@
 
 // §38 任务列表: 展示当前用户所有 Conversion Job(可按项目过滤)。
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import type { Job, Project } from "@/lib/types";
@@ -17,6 +18,7 @@ export default function JobsPage() {
   const [filter, setFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const searchParams = useSearchParams();
 
   const load = useCallback(async () => {
     try {
@@ -33,6 +35,12 @@ export default function JobsPage() {
       setLoading(false);
     }
   }, []);
+
+  // 从 URL ?project=xxx 读取项目筛选
+  useEffect(() => {
+    const p = searchParams.get("project");
+    if (p) setFilter(p);
+  }, [searchParams]);
 
   useEffect(() => {
     void load();
@@ -86,8 +94,8 @@ export default function JobsPage() {
               <TBody>
                 {shown.length === 0 && (
                   <tr>
-                    <Td colSpan={7} className="text-neutral-400">
-                      暂无任务
+                    <Td colSpan={7} className="py-6 text-center text-neutral-400">
+                      暂无任务 · 前往「项目」页面上传模型并创建转换任务
                     </Td>
                   </tr>
                 )}

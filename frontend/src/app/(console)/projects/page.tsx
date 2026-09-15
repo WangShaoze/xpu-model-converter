@@ -105,35 +105,38 @@ export default function ProjectsPage() {
           ) : (
             <Table>
               <THead>
-                <Th>名称</Th>
-                <Th>描述</Th>
+                <Th>项目</Th>
                 <Th>创建时间</Th>
-                <Th>更新时间</Th>
               </THead>
               <TBody>
                 {projects.length === 0 && (
                   <tr>
-                    <Td colSpan={4} className="text-neutral-400">
-                      暂无项目, 点击右上角创建
+                    <Td colSpan={2} className="py-8 text-center text-neutral-400">
+                      暂无项目，点击右上角「新建项目」开始
                     </Td>
                   </tr>
                 )}
                 {projects.map((p) => (
-                  <tr key={p.id} className="cursor-pointer hover:bg-neutral-50">
-                    <Td>
-                      <Link
-                        href={`/projects/${p.id}`}
-                        className="font-medium text-neutral-900 hover:underline"
-                      >
-                        {p.name}
-                      </Link>
-                    </Td>
-                    <Td className="max-w-64 truncate text-neutral-500">
-                      {p.description || "-"}
-                    </Td>
-                    <Td>{formatTime(p.created_at)}</Td>
-                    <Td>{formatTime(p.updated_at ?? null)}</Td>
-                  </tr>
+                  <Link
+                    key={p.id}
+                    href={`/projects/${p.id}`}
+                    className="block border-b border-neutral-100 px-5 py-3.5 transition-colors hover:bg-neutral-50"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0">
+                        <p className="font-medium text-neutral-900">{p.name}</p>
+                        <p className="mt-0.5 max-w-64 truncate text-xs text-neutral-400">
+                          {p.description || "无描述"}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-4 text-xs text-neutral-400">
+                        <span>{formatTime(p.created_at)}</span>
+                        <svg className="h-4 w-4 text-neutral-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                      </div>
+                    </div>
+                  </Link>
                 ))}
               </TBody>
             </Table>

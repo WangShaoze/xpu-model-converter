@@ -2,7 +2,7 @@
 
 // §37 项目详情: 模型上传(带进度) / 模型列表 / 创建 Conversion Job。
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, uploadModel } from "@/lib/api";
 import type { Job, Model, Project } from "@/lib/types";
@@ -20,6 +20,7 @@ const PRECISIONS = ["fp16", "fp32", "int8"];
 export default function ProjectDetailPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
+  const router = useRouter();
 
   const [project, setProject] = useState<Project | null>(null);
   const [models, setModels] = useState<Model[]>([]);
@@ -96,7 +97,7 @@ export default function ProjectDetailPage() {
         },
       });
       setJobFor(null);
-      window.location.href = `/jobs/${job.id}`;
+      router.push(`/jobs/${job.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建任务失败");
     } finally {
@@ -132,10 +133,22 @@ export default function ProjectDetailPage() {
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
+      {/* 流程指引 */}
+      <div className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-4 py-3 text-xs text-neutral-500">
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-[10px] font-semibold text-white">1</span>
+        <span>上传模型权重(.pt/.pth/.onnx)</span>
+        <span className="text-neutral-300">→</span>
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-[10px] font-semibold text-white">2</span>
+        <span>创建转换任务(选择精度/输入尺寸)</span>
+        <span className="text-neutral-300">→</span>
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-[10px] font-semibold text-white">3</span>
+        <span>查看产物 & 下载</span>
+      </div>
+
       <Card>
         <CardHeader
-          title="模型上传"
-          description="支持 .pt / .pth / .onnx 权重文件, 上传完成后在 Worker 中隔离处理"
+          title="① 模型上传"
+          description="支持 .pt / .pth / .onnx 权重文件, 上传完成后自动校验 SHA256"
           action={
             <Button size="sm" onClick={onPickFile} disabled={uploading}>
               {uploading ? `上传中 ${uploadPercent}%` : "选择文件"}
@@ -147,14 +160,22 @@ export default function ProjectDetailPage() {
           {uploading && <Progress value={uploadPercent} className="h-2" />}
           {!uploading && (
             <p className="text-xs text-neutral-400">
-              大文件上传使用分块进度显示; 后端将计算 SHA256 并校验完整性。
+              点击「选择文件」上传模型权重, 上传完成后状态变为 READY 即可创建转换任务
             </p>
           )}
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader title="模型列表" description={`共 ${models.length} 个模型`} />
+        <CardHeader
+          title="② 模型列表"
+          description={`共 ${models.length} 个模型 · 状态为 READY 的模型可创建转换任务`}
+          action={
+            <Link href={`/jobs?project=${projectId}`}>
+              <Button size="sm" variant="ghost">查看该项目任务 →</Button>
+            </Link>
+          }
+        />
         <CardContent className="p-0">
           <Table>
             <THead>
@@ -169,8 +190,8 @@ export default function ProjectDetailPage() {
             <TBody>
               {models.length === 0 && (
                 <tr>
-                  <Td colSpan={7} className="text-neutral-400">
-                    暂无模型, 请上传
+                  <Td colSpan={7} className="py-6 text-center text-neutral-400">
+                    暂无模型, 请先在上方「模型上传」区上传权重文件
                   </Td>
                 </tr>
               )}
@@ -201,7 +222,7 @@ export default function ProjectDetailPage() {
           {jobFor && (
             <div className="border-t border-neutral-100 bg-neutral-50 px-5 py-4">
               <p className="mb-3 text-sm font-medium text-neutral-800">
-                配置转换任务 (模型: {models.find((m) => m.id === jobFor)?.name})
+                ② 创建转换任务 (模型: {models.find((m) => m.id === jobFor)?.name})
               </p>
               <div className="flex flex-wrap items-end gap-3">
                 <div>
